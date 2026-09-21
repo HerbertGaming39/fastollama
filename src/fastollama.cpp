@@ -9,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
@@ -878,7 +879,32 @@ static void cmd_bench(App& app, const std::vector<std::string>& extra) {
     run(v);
 }
 
-static void cmd_pull(App& app, const std::string& name) {
+static void settings_set_kv(const std::string& base, const std::string& key, const std::string& val) {
+    std::string path = base + "/settings.txt";
+    std::ifstream in(path);
+    if (!in.is_open()) { std::cerr << "no settings.txt at " << path << "\n"; return; }
+    std::vector<std::string> lines;
+    std::string line;
+    bool wrote = false;
+    while (std::getline(in, line)) {
+        std::string t = trim(line);
+        if (!t.empty() && t[0] != '#') {
+            size_t e = t.find('=');
+            if (e != std::string::npos && trim(t.substr(0, e)) == key) {
+                lines.push_back(key + " = " + val);
+                wrote = true;
+                continue;
+            }
+        }
+        lines.push_back(line);
+    }
+    in.close();
+    if (!wrote) lines.push_back(key + " = " + val);
+    std::ofstream out(path);
+    for (auto& l : lines) out << l << "\n";
+}
+
+static void cmd_pull(App& app, const std::string& name, bool set_flag) {
     std::map<std::string, std::string> known = {
         {"qwen3-8b", "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf"},
         {"qwen3-8b-q4", "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf"},
@@ -890,9 +916,12 @@ static void cmd_pull(App& app, const std::string& name) {
         {"qwen3-30b", "https://huggingface.co/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF/resolve/main/Qwen3-30B-A3B-Instruct-2507-UD-Q4_K_XL.gguf"},
         {"qwen3.8-27b", "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-Q4_K_XL.gguf"},
         {"qwen3.8-27b-iq4", "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-IQ4_XS.gguf"},
+        {"qwen3.8-27b-iq2s", "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-IQ2_S.gguf"},
+        {"qwen3.8-27b-iq1m", "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-IQ1_M.gguf"},
+        {"qwen3-next-80b", "https://huggingface.co/unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF/resolve/main/Qwen3-Next-80B-A3B-Instruct-UD-IQ2_XXS.gguf"},
         {"qwen3.8-27b-mtp", "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/MTP/mtp-Qwen3.8-27B-Q4_0.gguf"},
         {"qwen3-0.6b", "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"},
-        {"qwen3-0.6b-q4", "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf"},
+        {"qwen3-0.6b-q4", "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf"},
         {"qwen3-1.7b", "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q8_0.gguf"},
         {"qwen3-4b", "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q8_0.gguf"},
         {"qwen3-4b-q3", "https://huggingface.co/unsloth/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q3_K_S.gguf"},
@@ -927,13 +956,46 @@ static void cmd_pull(App& app, const std::string& name) {
     std::string dst = app.base + "/models/" + out + ".gguf";
     if (file_exists(dst)) {
         std::cerr << "already have " << dst << "\n";
+        if (set_flag) settings_set_kv(app.base, out.rfind("mtp-", 0) == 0 ? "draft_model" : "model", out);
         return;
     }
+
+    // disk-space guard: model downloads are multi-GB, refuse to fill the disk
+    struct statvfs vfs;
+    if (statvfs(app.base.c_str(), &vfs) == 0) {
+        double free_gb = (double)vfs.f_bavail * vfs.f_frsize / (1024.0 * 1024.0 * 1024.0);
+        if (free_gb < 10.0) {
+            std::cerr << "only " << (int)free_gb << " GB free on " << app.base
+                      << " — models need 7-27 GB. free some space first\n";
+            exit(1);
+        }
+        std::cerr << "(" << (int)free_gb << " GB free on disk)\n";
+    }
+
     std::cerr << "pulling " << url << "\ninto " << dst << "\n";
-    execl("/usr/bin/curl", "curl", "-L", "--retry", "5", "--retry-delay", "3",
-          "-C", "-", "-o", dst.c_str(), url.c_str(), (char*)nullptr);
-    std::cerr << "curl exec failed\n";
-    exit(127);
+    fflush(stderr);
+    pid_t pid = fork();
+    if (pid == 0) {
+        execlp("curl", "curl", "-L", "--fail", "--retry", "5", "--retry-delay", "3",
+               "-C", "-", "-o", dst.c_str(), url.c_str(), (char*)nullptr);
+        std::cerr << "curl exec failed (is curl installed?)\n";
+        _exit(127);
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        std::cerr << "download failed (exit " << (WIFEXITED(st) ? WEXITSTATUS(st) : -1)
+                  << ") — partial file kept at " << dst << ", re-run pull to resume\n";
+        exit(1);
+    }
+    std::cerr << "done: " << dst << "\n";
+    if (out.rfind("mtp-", 0) == 0) {
+        if (set_flag) settings_set_kv(app.base, "draft_model", out);
+        std::cerr << "tip: set  spec_type = draft-mtp  in settings.txt\n";
+    } else {
+        if (set_flag) settings_set_kv(app.base, "model", out);
+        else std::cerr << "tip: set  model = " << out << "  in settings.txt (or re-run with --set)\n";
+    }
 }
 
 static void cmd_quantize(App& app, const std::string& src_name, const std::string& qtype,
@@ -995,7 +1057,7 @@ static void usage() {
         "  ask \"prompt\"       one-shot answer to stdout\n"
         "  bench              run llama-bench with tuned settings\n"
         "  plan               show vram-governor plan for current settings\n"
-        "  pull <name>        download model (qwen3.8-27b, qwen3.8-27b-iq4, qwen3.8-27b-mtp, qwen3-8b, qwen3-14b, qwen3-30b, qwen3-0.6b or full url)\n"
+        "  pull <name>        download model (qwen3.8-27b-iq2s [default], qwen3.8-27b, qwen3.8-27b-iq1m, qwen3-next-80b, qwen3.8-27b-mtp, qwen3-30b, qwen3-8b, qwen3-0.6b, ... or full url); add --set to wire into settings.txt\n"
         "  quantize <src> <q> create a quantized copy (e.g. quantize Qwen3-8B-Q8_0 Q4_0)\n"
         "  list               list downloaded models\n"
         "  stop               kill running llama-server\n"
@@ -1027,8 +1089,10 @@ int main(int argc, char** argv) {
     else if (cmd == "bench") cmd_bench(app, extra);
     else if (cmd == "plan") cmd_plan(app, argc >= 3 ? argv[2] : "");
     else if (cmd == "pull") {
-        if (argc < 3) { std::cerr << "usage: fastollama pull <name>\n"; return 1; }
-        cmd_pull(app, argv[2]);
+        if (argc < 3) { std::cerr << "usage: fastollama pull <name> [--set]\n"; return 1; }
+        bool set_flag = false;
+        for (int i = 3; i < argc; i++) if (std::string(argv[i]) == "--set") set_flag = true;
+        cmd_pull(app, argv[2], set_flag);
     }
     else if (cmd == "quantize") {
         if (argc < 4) { std::cerr << "usage: fastollama quantize <model-name> <QTYPE>\n"; return 1; }
