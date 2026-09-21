@@ -125,10 +125,13 @@ Tested on: Mesa RADV, 9070 XT (GFX1201), kernel 6.x, Arch-style Linux. The gover
 | `mtp-Qwen3.8-27B-Q4_0.gguf` | 1.4 GB | MTP draft head (required for spec decoding) |
 
 ```bash
-bin/fastollama pull qwen3.8-27b          # Q4_K_XL quality tier
-bin/fastollama pull qwen3.8-27b-mtp      # MTP draft
-# or any direct URL:
-bin/fastollama pull https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-IQ2_S.gguf
+bin/fastollama pull qwen3.8-27b-iq2s --set   # the default config (8.4 GB)
+bin/fastollama pull qwen3.8-27b-iq1m --set   # max speed tier (~92 t/s)
+bin/fastollama pull qwen3-next-80b   --set   # the 80B MoE (26.2 GB)
+bin/fastollama pull qwen3.8-27b-mtp  --set   # MTP draft head
+# --set wires the download straight into settings.txt
+# every alias URL is verified live; resumes interrupted downloads;
+# refuses to run with <10 GB free disk
 ```
 
 **Qwen3.8 family facts:** there is no "Qwen3.8-72B" — the dense family is 27B (256K native, vision, reasoning, MTP head) and Flash-Next (176B MoE, cannot fit this PC). The 80B-class 256K model is **Qwen3-Next-80B-A3B**; see below.
