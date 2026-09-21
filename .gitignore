@@ -1,0 +1,20 @@
+# Model weights stay local — multi-GB, re-downloadable from HuggingFace
+models/
+*.gguf
+
+# Engine build trees (llama.cpp is fetched at the pinned commit + patch)
+llama.cpp/
+
+# Runtime output
+logs/
+bin/
+*.log
+
+# App-internal state
+.freebuff/
+
+# Editor/OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
