@@ -18,3 +18,7 @@ bin/
 .idea/
 *.swp
 .DS_Store
+
+# design-review scratch files (huge embedded base64)
+assets/preview.html
+assets/compare.html
