@@ -1,5 +1,21 @@
 # fastollama
 
+<div align="center">
+  <img src="assets/icon-1024.png" width="160" alt="fastollama">
+</div>
+
+<div align="center">
+
+[![GitHub stars](https://img.shields.io/github/stars/HerbertGaming39/fastollama?style=flat-square&color=E11D2E)](https://github.com/HerbertGaming39/fastollama/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/HerbertGaming39/fastollama?style=flat-square)](https://github.com/HerbertGaming39/fastollama/network/members)
+[![Issues](https://img.shields.io/github/issues/HerbertGaming39/fastollama?style=flat-square)](https://github.com/HerbertGaming39/fastollama/issues)
+[![License: MIT](https://img.shields.io/badge/license-MIT-E11D2E?style=flat-square)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Vulkan-464646?style=flat-square)]()
+![C++](https://img.shields.io/badge/C%2B%2B-17-00599C?style=flat-square&logo=cplusplus&logoColor=white)
+
+</div>
+
+---
 A tuned llama.cpp runner for the **AMD RX 9070 XT (gfx1201 / RDNA4) + Ryzen 7 9700X + 32 GB RAM** box, built to run the newest Qwen models at their **maximum native context** with every optimization that actually measures faster on this hardware.
 
 Everything is compiled from source (llama.cpp fork, pinned at commit `1af554f`):
@@ -33,7 +49,7 @@ Full **262,144-token context** (the model's native max — no YaRN tricks), VRAM
 | Qwen3-30B-A3B-UD-Q4_K_XL (MoE) | 262144 | 30.5 | 105 | 13.5 GB | expert split |
 | Qwen3-30B-A3B-UD-Q4_K_XL (MoE) | 40960 | 40.3 | 154 | 13.9 GB | expert split |
 
-Quality verification on the speed configs (not just "it compiled"): IQ1_M and IQ2_S both answer 17×23=391 ✓, Berlin Wall 1989 ✓, accurate Apollo 11 summaries ✓. These are unsloth *dynamic* quants built with the official imatrix — nothing like the garbage 1-bit quants of years past.
+Quality spot-checks on the speed configs passed basic math and history questions — these are unsloth *dynamic* quants built with the official imatrix, a different beast from the garbage 1-bit quants of years past.
 
 ### The one rule that explains every number
 
@@ -160,3 +176,13 @@ The 80B sweet spot: **UD-IQ2_XXS (26.2 GB)** — small enough that the non-exper
 - **MoE models are the throughput path**, not the density path: 36–38 t/s at full 262K on the 80B-A3B, 30.5 t/s on the 30B-A3B.
 
 *Benchmarks: 2026-09-20/21, Mesa RADV GFX1201, Vulkan, kernel 6.x, temperatures ambient, 3-run medians where variance existed. Scripts and logs in `logs/`.*
+
+---
+
+<div align="center">
+
+## ⭐ Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=HerbertGaming39/fastollama&type=Date)](https://star-history.com/#HerbertGaming39/fastollama&Date)
+
+</div>
