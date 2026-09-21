@@ -462,7 +462,14 @@ struct App {
         return model_path("Qwen3-8B-Q4_K_M");
     }
     std::string draft_model() const { return model_path(cfg.get("draft_model", "Qwen3-0.6B-Q4_K_M")); }
-    std::string llama_server() const { return base + "/llama.cpp/" + backend_dir() + "/bin/llama-server"; }
+    std::string llama_server() const {
+        std::string ed = cfg.get("engine_dir", "");
+        if (!ed.empty()) {
+            if (ed[0] != '/') ed = base + "/" + ed;
+            return ed + "/llama-server";
+        }
+        return base + "/llama.cpp/" + backend_dir() + "/bin/llama-server";
+    }
     std::string llama_cli() const { return base + "/llama.cpp/" + backend_dir() + "/bin/llama-cli"; }
     std::string llama_bench() const { return base + "/llama.cpp/" + backend_dir() + "/bin/llama-bench"; }
     std::string llama_quantize() const { return base + "/llama.cpp/" + backend_dir() + "/bin/llama-quantize"; }
