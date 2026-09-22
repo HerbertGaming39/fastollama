@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cerrno>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -430,7 +431,20 @@ struct App {
     std::string lbin;
     std::string model_path(const std::string& name) const {
         if (name.find('/') != std::string::npos) return name;
-        return base + "/models/" + name + ".gguf";
+        std::string p = base + "/models/" + name + ".gguf";
+        if (file_exists(p)) return p;
+        // multi-shard models: the user names the model, we resolve to shard 1
+        // (llama.cpp finds the rest automatically). Supports flat layout
+        // (models/X-00001-of-0000M.gguf) and dir layout (models/X/X-00001-of-...).
+        for (int n = 2; n <= 9; n++) {
+            char t[80];
+            snprintf(t, sizeof(t), "-00001-of-0000%d.gguf", n);
+            std::string flat = base + "/models/" + name + t;
+            if (file_exists(flat)) return flat;
+            std::string in_dir = base + "/models/" + name + "/" + name + t;
+            if (file_exists(in_dir)) return in_dir;
+        }
+        return p;
     }
     // model = auto: walk the Qwen3.8-27B quant ladder from best quality down and pick
     // the LARGEST quant whose whole model fits on the GPU (plan.full_gpu). A fully-GPU
@@ -439,6 +453,7 @@ struct App {
         std::string want = cfg.get("model", "Qwen3-8B-Q4_K_M");
         if (want != "auto") return model_path(want);
         static const char* LADDER[] = {
+            "Qwen3.8-Flash-Next-UD-IQ1_S", // 177B-class, only if downloaded (governor splits it)
             "Qwen3.8-27B-UD-Q4_K_XL", "Qwen3.8-27B-UD-Q4_K_M", "Qwen3.8-27B-UD-Q4_K_S",
             "Qwen3.8-27B-UD-IQ4_XS",  "Qwen3.8-27B-UD-Q3_K_XL", "Qwen3.8-27B-UD-IQ3_XXS",
             "Qwen3.8-27B-UD-IQ2_S",   "Qwen3.8-27B-UD-IQ2_XXS",
@@ -654,7 +669,7 @@ static std::vector<char*> to_argv(const std::vector<std::string>& in) {
     return out;
 }
 
-static void run(const std::vector<std::string>& args, bool wait = true) {
+static pid_t run(const std::vector<std::string>& args, bool wait = true) {
     auto av = to_argv(args);
     pid_t pid = fork();
     if (pid == 0) {
@@ -667,6 +682,7 @@ static void run(const std::vector<std::string>& args, bool wait = true) {
         waitpid(pid, &st, 0);
         if (WIFEXITED(st) && WEXITSTATUS(st) != 0) exit(WEXITSTATUS(st));
     }
+    return pid;
 }
 
 static void gpu_args(App& app, const std::string& model, std::vector<std::string>& v) {
@@ -785,8 +801,12 @@ static std::vector<std::string> model_args(App& app, bool want_draft) {
     }
     if (app.cfg.getb("mlock", false)) v.push_back("--mlock");
     if (app.cfg.getb("no_mmap", false)) v.push_back("--no-mmap");
-    float defrag = app.cfg.getf("defrag", 0.1f);
-    if (defrag > 0.0f) { v.push_back("--defrag-thold"); v.push_back(std::to_string(defrag)); }
+    // defrag: deprecated upstream (auto-defrag now); kept as no-op for old settings
+    if (app.cfg.getf("defrag", 0.1f) <= 0.0f) { /* 0 = off, nothing to do */ }
+    if (app.cfg.getb("kv_unified", false)) v.push_back("--kv-unified");
+    int cre = app.cfg.geti("cache_reuse", 0);
+    if (cre > 0) { v.push_back("--cache-reuse"); v.push_back(std::to_string(cre)); }
+    if (app.cfg.getb("no_context_shift", false)) v.push_back("--no-context-shift");
     return v;
 }
 
@@ -825,7 +845,31 @@ static void cmd_serve(App& app, const std::vector<std::string>& extra) {
     v.insert(v.end(), extra.begin(), extra.end());
     std::cerr << "fastollama serving " << m << " -> http://" << app.cfg.get("host", "127.0.0.1")
               << ":" << app.cfg.geti("port", 8080) << "\n";
-    run(v);
+    pid_t srv = run(v);
+    // VRAM guard dog: llama-server has no --vram-limit flag, so we enforce it from the
+    // outside. If VRAM use crosses the emergency line (default 99.5% of total) we stop
+    // the server cleanly instead of letting the driver thrash/freeze the desktop.
+    // Budget-side enforcement happens in plan_vram (vram_limit_gb); this is the last resort.
+    if (srv > 0 && app.cfg.getb("vram_guard", true)) {
+        double em = app.cfg.getf("vram_emergency_pct", 0.995f);
+        pid_t guard = fork();
+        if (guard == 0) {
+            uint64_t total = amd_vram_total();
+            while (true) {
+                usleep(500 * 1000);
+                if (kill(srv, 0) != 0) _exit(0); // server already gone
+                uint64_t used = amd_vram_used();
+                if (total > 0 && used >= (uint64_t)((double)total * em)) {
+                    std::cerr << "\n[fastollama] VRAM GUARD: " << used / 1024 / 1024 << "/"
+                              << total / 1024 / 1024 << " MiB used — stopping server to protect the desktop\n";
+                    kill(srv, SIGTERM);
+                    usleep(3000000);
+                    kill(srv, SIGKILL);
+                    _exit(42);
+                }
+            }
+        }
+    }
 }
 
 static void cmd_chat(App& app, const std::vector<std::string>& extra) {
@@ -928,6 +972,20 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
         {"qwen3-4b-iq4", "https://huggingface.co/unsloth/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-IQ4_XS.gguf"},
         {"qwen3-4b-2507", "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-IQ4_XS.gguf"},
         {"qwen3-8b-iq4", "https://huggingface.co/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-IQ4_XS.gguf"},
+        // --- non-Qwen families: anything llama.cpp supports works here ---
+        {"llama3.1-8b", "https://huggingface.co/unsloth/Llama-3.1-8B-GGUF/resolve/main/Llama-3.1-8B-Q4_K_M.gguf"},
+        {"llama3.2-3b", "https://huggingface.co/unsloth/Llama-3.2-3B-GGUF/resolve/main/Llama-3.2-3B-Q4_K_M.gguf"},
+        {"gemma3-4b", "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf"},
+        {"gemma3-12b", "https://huggingface.co/unsloth/gemma-3-12b-it-GGUF/resolve/main/gemma-3-12b-it-Q4_K_M.gguf"},
+        {"gemma3-27b", "https://huggingface.co/unsloth/gemma-3-27b-it-GGUF/resolve/main/gemma-3-27b-it-Q4_K_M.gguf"},
+        {"mistral-7b", "https://huggingface.co/unsloth/mistral-7b-instruct-v0.3-GGUF/resolve/main/mistral-7b-instruct-v0.3-Q4_K_M.gguf"},
+        {"mistral-nemo", "https://huggingface.co/unsloth/Mistral-Nemo-Instruct-2407-GGUF/resolve/main/Mistral-Nemo-Instruct-2407-Q4_K_M.gguf"},
+        {"phi4", "https://huggingface.co/unsloth/phi-4-GGUF/resolve/main/phi-4-Q4_K_M.gguf"},
+        {"deepseek-r1-8b", "https://huggingface.co/unsloth/DeepSeek-R1-Distill-Llama-8B-GGUF/resolve/main/DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf"},
+        // --- newest Qwen: Qwen4-preview arch (~177B, n-gram embeddings; multi-shard: pull shards 1..3) ---
+        {"flash-next-iq1s", "https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/main/UD-IQ1_S/Qwen3.8-Flash-Next-UD-IQ1_S-00001-of-00003.gguf"},
+        {"flash-next-iq1m", "https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/main/UD-IQ1_M/Qwen3.8-Flash-Next-UD-IQ1_M-00001-of-00003.gguf"},
+        {"flash-next-mtp", "https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/main/MTP/mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf"},
     };
     std::string url;
     std::string out;
@@ -972,29 +1030,84 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
         std::cerr << "(" << (int)free_gb << " GB free on disk)\n";
     }
 
-    std::cerr << "pulling " << url << "\ninto " << dst << "\n";
-    fflush(stderr);
-    pid_t pid = fork();
-    if (pid == 0) {
-        execlp("curl", "curl", "-L", "--fail", "--retry", "5", "--retry-delay", "3",
-               "-C", "-", "-o", dst.c_str(), url.c_str(), (char*)nullptr);
-        std::cerr << "curl exec failed (is curl installed?)\n";
-        _exit(127);
-    }
-    int st = 0;
-    waitpid(pid, &st, 0);
-    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
-        std::cerr << "download failed (exit " << (WIFEXITED(st) ? WEXITSTATUS(st) : -1)
-                  << ") — partial file kept at " << dst << ", re-run pull to resume\n";
-        exit(1);
+    // download helper with resume + retry (shared by all shards)
+    auto remote_bytes = [](const std::string& u) -> uint64_t {
+        std::string cmd = "curl -sIL '" + u + "' 2>/dev/null | tr -d '\\r' | "
+                          "awk 'tolower($1)==\"content-length:\" {v=$2} END{print v+0}'";
+        FILE* pp = popen(cmd.c_str(), "r");
+        if (!pp) return 0;
+        unsigned long long v = 0;
+        if (fscanf(pp, "%llu", &v) != 1) v = 0;
+        pclose(pp);
+        return v;
+    };
+    auto fetch = [&](const std::string& u, const std::string& d) -> bool {
+        // refuse to start a download that cannot fit: wasted hours are worse than errors
+        uint64_t rb = remote_bytes(u);
+        if (rb > 0) {
+            struct statvfs v2;
+            if (statvfs(app.base.c_str(), &v2) == 0) {
+                double free_b = (double)v2.f_bavail * v2.f_frsize;
+                if (free_b < (double)rb * 1.05) {
+                    std::cerr << "not enough disk: need " << rb / 1024 / 1024 / 1024
+                              << " GB, have " << (uint64_t)free_b / 1024 / 1024 / 1024 << " GB\n";
+                    exit(1);
+                }
+            }
+        }
+        std::cerr << "pulling " << u << "\ninto   " << d << "\n";
+        fflush(stderr);
+        pid_t pid = fork();
+        if (pid == 0) {
+            execlp("curl", "curl", "-L", "--fail", "--retry", "5", "--retry-delay", "3",
+                   "-C", "-", "-o", d.c_str(), u.c_str(), (char*)nullptr);
+            std::cerr << "curl exec failed (is curl installed?)\n";
+            _exit(127);
+        }
+        int st = 0;
+        waitpid(pid, &st, 0);
+        return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    };
+
+    // llama.cpp multi-shard models: file is X-00001-of-0000M.gguf and llama-server loads
+    // the whole model from shard 1 — so pull must fetch ALL M shards.
+    int n_shards = 1;
+    size_t sh = out.find("-00001-of-");
+    if (sh != std::string::npos) n_shards = atoi(out.c_str() + sh + 10);
+    if (n_shards > 1) std::cerr << "multi-shard model: " << n_shards << " shards\n";
+
+    for (int i = 1; i <= n_shards; i++) {
+        std::string name_i = out, url_i = url;
+        if (n_shards > 1) {
+            char tail[48];
+            snprintf(tail, sizeof(tail), "-0000%d-of-0000%d.gguf", i, n_shards);
+            name_i = out.substr(0, sh) + tail;
+            url_i = url.substr(0, url.find_last_of('/') + 1) + name_i;
+        }
+        std::string dst_i = app.base + "/models/" + name_i + ".gguf";
+        if (file_exists(dst_i)) {
+            std::cerr << "already have shard " << i << "/" << n_shards << "\n";
+            continue;
+        }
+        if (!fetch(url_i, dst_i)) {
+            std::cerr << "download failed — partial file kept at " << dst_i
+                      << ", re-run pull to resume\n";
+            exit(1);
+        }
+        if (n_shards > 1) std::cerr << "shard " << i << "/" << n_shards << " done\n";
     }
     std::cerr << "done: " << dst << "\n";
+    // settings value: for multi-shard models use the clean base name (model_path
+    // resolves it to shard 1 automatically)
+    std::string settings_name = out;
+    size_t sh2 = out.find("-00001-of-");
+    if (sh2 != std::string::npos) settings_name = out.substr(0, sh2);
     if (out.rfind("mtp-", 0) == 0) {
-        if (set_flag) settings_set_kv(app.base, "draft_model", out);
+        if (set_flag) settings_set_kv(app.base, "draft_model", settings_name);
         std::cerr << "tip: set  spec_type = draft-mtp  in settings.txt\n";
     } else {
-        if (set_flag) settings_set_kv(app.base, "model", out);
-        else std::cerr << "tip: set  model = " << out << "  in settings.txt (or re-run with --set)\n";
+        if (set_flag) settings_set_kv(app.base, "model", settings_name);
+        else std::cerr << "tip: set  model = " << settings_name << "  in settings.txt (or re-run with --set)\n";
     }
 }
 
