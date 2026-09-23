@@ -136,3 +136,8 @@ full_gpu = 1
 # calibrated: measured engine VRAM floor with all experts offloaded (K=0) on this
 # machine: Qwen3.8-Flash-Next @ 262K = 10.1 GiB. Planner spends only what's really left.
 vram_fixed_gpu_gb = 10.1
+# RAM budget: if the part of the model that must live in system RAM doesn't fit
+# (RAM minus this reserve), fastollama refuses to start instead of freezing the
+# whole desktop with disk thrashing. Set allow_disk_stream = 1 to override.
+ram_reserve_gb = 4
+allow_disk_stream = 0

@@ -474,6 +474,14 @@ static uint64_t amd_vram_used() {
     return u;
 }
 
+static uint64_t ram_available_bytes() {
+    long pages = sysconf(_SC_AVPHYS_PAGES);
+    long psize = sysconf(_SC_PAGESIZE);
+    if (pages <= 0 || psize <= 0) return 0;
+    return (uint64_t)pages * (uint64_t)psize;
+}
+
+
 static bool file_exists(const std::string& path);
 struct App;
 
@@ -573,6 +581,32 @@ struct App {
         setenv("GGML_VK_ALLOW_SYSMEM_FALLBACK", "0", 1);
     }
 };
+
+// RAM is the other half of the budget. A model whose CPU-resident share exceeds
+// available RAM does not merely run slow — it thrashes disk via mmap and can
+// freeze the whole desktop (page allocation failures in unrelated processes).
+// Refuse that launch unless the user explicitly asks for disk streaming.
+static bool ram_feasible_or_die(const App& app, const std::string& model, uint64_t est_gpu_bytes) {
+    uint64_t msz = model_file_size_all_shards(model);
+    uint64_t ram_need = msz > est_gpu_bytes ? msz - est_gpu_bytes : 0;
+    double reserve = app.cfg.getf("ram_reserve_gb", 4.0) * 1024.0 * 1024.0 * 1024.0;
+    uint64_t avail = ram_available_bytes();
+    if (ram_need + (uint64_t)reserve <= avail) return true;
+    std::cerr << "\n[fastollama] RAM BUDGET: this plan needs " << ram_need / 1024 / 1024
+              << " MiB of system RAM (model " << msz / 1024 / 1024 << " MiB minus "
+              << est_gpu_bytes / 1024 / 1024 << " MiB on GPU), but only "
+              << avail / 1024 / 1024 << " MiB is available (keeping "
+              << (uint64_t)reserve / 1024 / 1024 << " MiB reserve for the desktop).\n";
+    std::cerr << "[fastollama] Running it anyway would stream weights from disk and can\n"
+              << "             freeze the entire system, not just the model.\n";
+    if (app.cfg.getb("allow_disk_stream", false)) {
+        std::cerr << "[fastollama] allow_disk_stream = 1 -> starting anyway. Expect heavy slowdowns.\n";
+        return true;
+    }
+    std::cerr << "[fastollama] Refusing to start. Use a smaller quant (fastollama pull ...),\n"
+              << "             or set allow_disk_stream = 1 in settings.txt to override.\n";
+    return false;
+}
 
 static VramPlan plan_vram(const App& app, const std::string& model) {
     VramPlan p{};
@@ -813,7 +847,9 @@ static void gpu_args(App& app, const std::string& model, std::vector<std::string
             probe.ot_regex.clear();
             probe.n_expert_layers = 0;
             probe.full_gpu = false;
+            probe.est_bytes = 0; // ngl=0: nothing on GPU -> RAM must hold the whole model
             ngl = "0";
+            if (!ram_feasible_or_die(app, model, probe.est_bytes)) exit(1);
         } else if (probe.full_gpu) {
             // 2% slack: compute/MTP estimates are deliberately padded; empirical loads land
             // ~0.5GB under estimate. Budget itself already enforces the hard VRAM limit.
@@ -826,6 +862,7 @@ static void gpu_args(App& app, const std::string& model, std::vector<std::string
                       << probe.est_bytes / 1024 / 1024 << " MiB > budget "
                       << probe.allowed_bytes / 1024 / 1024 << " MiB -> governor split\n";
             report_plan(app, model, probe);
+            if (!ram_feasible_or_die(app, model, probe.est_bytes)) exit(1);
             ngl = std::to_string(probe.ngl);
             if (!probe.ot_regex.empty()) {
                 std::cerr << "[vram-governor] smart -ot offloading " << probe.ot_regex.substr(0, 60) << "... =CPU\n";
@@ -849,8 +886,11 @@ static void gpu_args(App& app, const std::string& model, std::vector<std::string
             p2.ngl = 0;
             p2.ot_regex.clear();
             p2.n_expert_layers = 0;
+            p2.est_bytes = 0; // ngl=0: RAM must hold the whole model
+            if (!ram_feasible_or_die(app, model, p2.est_bytes)) exit(1);
         }
         report_plan(app, model, p2);
+        if (!ram_feasible_or_die(app, model, p2.est_bytes)) exit(1);
         ngl = std::to_string(p2.ngl);
         if (!p2.ot_regex.empty()) {
             std::cerr << "[vram-governor] smart -ot offloading " << p2.ot_regex.substr(0, 60) << "... =CPU\n";
