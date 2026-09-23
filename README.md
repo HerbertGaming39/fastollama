@@ -50,6 +50,7 @@ Full **262,144-token context** (native max), VRAM capped at 15 GB so the desktop
 | **Qwen3.8-27B-UD-IQ2_S** | 262144 | **71–86** | ~1000 | 14.4 GB | full_gpu |
 | Qwen3.8-27B-UD-IQ1_M (max speed) | 262144 | **90–92** | 184 | 14.5 GB | full_gpu |
 | **Qwen3-Next-80B-A3B-UD-IQ2_XXS** | 262144 | **36–38** | 808 | 14.5 GB | full_gpu |
+| Qwen3.8-Flash-Next-UD-IQ1_S (177B-class Qwen4-preview arch) | 262144 | **4.0** | 119 | **14.1 GB** | expert split (44/48 experts in RAM) |
 | Qwen3-30B-A3B-UD-Q4_K_XL (MoE) | 262144 | 30.5 | 105 | 13.5 GB | expert split |
 | Qwen3.8-27B-UD-Q4_K_XL (max quality) | 262144 | 6.9 | 27 | 13.4 GB | smart split |
 
@@ -158,8 +159,9 @@ The governor is one portable C++ file, no dependencies beyond libstdc++. Verifie
 | `context` | `262144` | tokens of context (pair with `kv_cache`) |
 | `kv_cache` | `q4_0` | KV quant — f16 is ~25× bigger at 256K |
 | `vram_limit_gb` | `15` | hard engine cap — the desktop-safety promise |
+| `vram_fixed_gpu_gb` | `0` (auto) | measured non-expert VRAM floor (attn core + KV + buffers). Set it after one calibration run with all experts offloaded — the planner then spends only what is really left |
 | `vram_free_min_gb` | `1.3` | always-kept-free margin |
-| `vram_guard` | `1` | live watchdog; `vram_emergency_pct` = kill line (0.995) |
+| `vram_guard` | `1` | live watchdog; `vram_emergency_pct` = kill line (default **0.95** — fires *before* the desktop dies) |
 | `spec_type` | `draft-mtp` | MTP speculative decoding (`off` to disable) |
 | `draft_max` | `2` | tuned on hardware (4/6 measured slower) |
 | `ubatch` | `1024` | prompt-processing micro-batch |

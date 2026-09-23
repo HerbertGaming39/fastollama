@@ -37,13 +37,13 @@ backend = vulkan
 # compute-buffer sizes and picks the layer split for you. Whole layers spill
 # to your 32 GB RAM automatically instead of OOM-crashing GNOME.
 # Set auto_vram = 0 to use the fixed gpu_layers value below instead.
-vram_limit_gb = 15
+vram_limit_gb = 14
 vram_free_min_gb = 1.3
 # Last-resort watchdog: if VRAM use ever crosses vram_emergency_pct of total
 # (driver peak, leak, second app grabbing memory) the server is stopped cleanly
 # instead of freezing GNOME. vram_guard = 0 disables.
 vram_guard = 1
-vram_emergency_pct = 0.995
+vram_emergency_pct = 0.95
 auto_vram = 0
 # ot_mode: layers = classic whole-layer split (ngl), smart = keep ALL attention/KV
 # layers on GPU and offload only the heavy FFN/SSM tensors of the remaining layers
@@ -88,13 +88,14 @@ ubatch = 1024
 # flash attention: 1 = ON (always keep on, it is pure speed+memory win here)
 flash_attn = 1
 
-# --- MTP speculative decoding (Qwen3.8-27B ships an MTP head) ---
-# spec_type = draft-mtp uses models/mtp-Qwen3.8-27B-Q4_0.gguf to draft several
-# tokens per step, verified in one pass by the big model. Can be a large
-# speedup (30-80%+) with zero quality loss (drafts are verified).
-# spec_type = draft = classic small-draft-model speculative decoding.
+# --- MTP / speculative decoding ---
+# spec_type = draft-mtp: MTP sidecar drafts tokens, the big model verifies in one pass.
+#   Both sidecars shipped for Flash-Next currently fail our engine's loader
+#   (missing token_embd / output_hc_norm tensors) — so it is OFF for Flash-Next.
+#   For Qwen3.8-27B use: spec_type = draft-mtp + mtp_model = mtp-Qwen3.8-27B-Q4_0
+# spec_type = draft: classic small-draft-model speculative decoding.
 # spec_type = off (or empty + speculative = 0) disables it.
-spec_type = draft-mtp
+spec_type = off
 mtp_model = mtp-Qwen3.8-27B-Q4_0
 draft_max = 2
 draft_min = 1
@@ -132,3 +133,6 @@ bench_reps = 3
 # full_gpu = 1: force the WHOLE model + KV on the GPU (fastest; needs quant that fits)
 # governor auto-falls-back to smart split if it does not fit
 full_gpu = 1
+# calibrated: measured engine VRAM floor with all experts offloaded (K=0) on this
+# machine: Qwen3.8-Flash-Next @ 262K = 10.1 GiB. Planner spends only what's really left.
+vram_fixed_gpu_gb = 10.1

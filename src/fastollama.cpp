@@ -106,6 +106,15 @@ struct GgufInfo {
     };
     std::map<int, LayerInfo> layers;
     double nonblk_bytes = 0.0; // token_embd, output head, etc.
+    // cross-shard accumulators (shard N's tensor list only knows about shard N)
+    double expert_sum_acc = 0.0;
+    std::map<int, double> expert_per_layer_acc;
+    std::map<int, int> attn_ids_acc;
+    std::map<std::string, double> nonblk_families; // non-blk tensors grouped by name family
+    double nonblk_gpu_bytes = 0.0;  // non-blk bytes small enough to keep on GPU
+    std::string nonblk_cpu_regex;   // -ot alternation for giant tables (n-gram embeddings etc.)
+    bool parsed = false;
+    int shards = 0;
 };
 
 static double ggml_type_bpw(uint32_t t) {
@@ -131,7 +140,8 @@ static double ggml_type_bpw(uint32_t t) {
         case 21: return 3.4375;
         case 22: return 2.5;
         case 23: return 4.25;
-        default: return 16.0;
+        default: return 4.5; // unknown quant: assume ~4.5 bpw. NEVER f16 — an over-estimate
+                             // wastes budget, an under-estimate kills the desktop
     }
 }
 
@@ -181,16 +191,16 @@ static void gguf_skip_value(std::ifstream& f, uint32_t type) {
     }
 }
 
-static GgufInfo read_gguf(const std::string& path) {
-    GgufInfo g;
+// Parse ONE gguf file's header + tensor list into g (called once per shard).
+static void read_gguf_one(const std::string& path, GgufInfo& g) {
     std::ifstream f(path, std::ios::binary);
-    if (!f.is_open()) return g;
+    if (!f.is_open()) return;
     uint32_t magic, version;
     uint64_t tensor_count, kv_count;
     f.read((char*)&magic, 4);
-    if (magic != 0x46554747) return g;
+    if (magic != 0x46554747) return;
     f.read((char*)&version, 4);
-    if (version < 2) return g;
+    if (version < 2) return;
     gguf_read_pod(f, tensor_count);
     gguf_read_pod(f, kv_count);
     std::string arch_name;
@@ -261,13 +271,16 @@ static GgufInfo read_gguf(const std::string& path) {
         }
     }
     auto it = kvmap.find("general.architecture");
-    g.arch = it != kvmap.end() ? it->second : "";
-    auto getu = [&](const std::string& k, int d) {
-        auto jt = kvmap.find(k);
-        if (jt == kvmap.end()) return d;
-        return atoi(jt->second.c_str());
-    };
-    if (!g.arch.empty()) {
+    // only arch-carrying shards (normally shard 1) define metadata. Later shards have
+    // empty KV maps here — deriving from defaults would zero n_layer and flip g.ok
+    // off AFTER earlier shards set it correctly.
+    if (it != kvmap.end() && !it->second.empty()) {
+        g.arch = it->second;
+        auto getu = [&](const std::string& k, int d) {
+            auto jt = kvmap.find(k);
+            if (jt == kvmap.end()) return d;
+            return atoi(jt->second.c_str());
+        };
         g.n_layer   = getu(g.arch + ".block_count", 0);
         g.n_head_kv = getu(g.arch + ".attention.head_count_kv", 0);
         g.head_dim  = getu(g.arch + ".attention.key_length", getu(g.arch + ".attention.head_dim", 0));
@@ -284,9 +297,8 @@ static GgufInfo read_gguf(const std::string& path) {
         if (g.n_kv_layers <= 0 || g.n_kv_layers > g.n_layer) g.n_kv_layers = g.n_layer;
     }
     if (g.ok && tensor_count > 0 && tensor_count < 100000) {
-        double expert_sum = 0.0;
-        std::map<int, double> expert_per_layer;
-        std::map<int, int> attn_layer_ids; // hybrid archs: only some layers carry KV
+        g.parsed = true;
+        g.shards++;
         for (uint64_t i = 0; i < tensor_count; i++) {
             std::string name;
             uint32_t nd;
@@ -321,40 +333,95 @@ static GgufInfo read_gguf(const std::string& path) {
                     }
                 } else {
                     g.nonblk_bytes += bytes;
+                    g.nonblk_families[name.substr(0, name.find('.'))] += bytes;
                 }
             }
             if (name.find("attn_k") != std::string::npos || name.find("attn_v") != std::string::npos) {
                 size_t bp = name.find("blk.");
                 if (bp != std::string::npos) {
                     size_t dp = name.find('.', bp + 4);
-                    if (dp != std::string::npos) attn_layer_ids[atoi(name.substr(bp + 4, dp - bp - 4).c_str())] = 1;
+                    if (dp != std::string::npos) g.attn_ids_acc[atoi(name.substr(bp + 4, dp - bp - 4).c_str())] = 1;
                 }
             }
             if (is_expert) {
-                expert_sum += bytes;
+                g.expert_sum_acc += bytes;
                 int li = -1;
                 size_t bp = name.find("blk.");
                 if (bp != std::string::npos) {
                     size_t dp = name.find('.', bp + 4);
                     if (dp != std::string::npos) li = atoi(name.substr(bp + 4, dp - bp - 4).c_str());
                 }
-                if (li >= 0) expert_per_layer[li] += bytes;
-            }
-        }
-        if (!expert_per_layer.empty()) {
-            g.is_moe = true;
-            g.n_expert_layers = (int)expert_per_layer.size();
-            g.expert_bytes_total = expert_sum;
-        }
-        if (!attn_layer_ids.empty()) {
-            g.n_kv_layers = (int)attn_layer_ids.size();
-            if (g.n_kv_layers > 0 && g.n_kv_layers <= g.n_layer) {
-                // +1 headroom: linear layers keep small fixed recurrent state
-                g.n_kv_layers = std::min(g.n_layer, g.n_kv_layers + 1);
+                if (li >= 0) g.expert_per_layer_acc[li] += bytes;
             }
         }
     }
+}
+
+// Multi-shard GGUF: every shard carries the KV metadata but lists ONLY ITS OWN
+// tensors. Parsing just shard 1 sees a sliver of the model (this exact bug sized a
+// 70 GB model as 11 MB, planned it as full-GPU, and OOM-killed the session).
+// Shard 1 provides arch metadata; every shard's tensors are folded in.
+static GgufInfo read_gguf(const std::string& path) {
+    GgufInfo g;
+    read_gguf_one(path, g);
+    std::string dir, fname;
+    size_t slash = path.find_last_of('/');
+    if (slash == std::string::npos) { fname = path; }
+    else { dir = path.substr(0, slash + 1); fname = path.substr(slash + 1); }
+    const std::string pat = "-00001-of-0000";
+    size_t p = fname.find(pat);
+    if (p == std::string::npos || fname.size() < p + pat.size() + 1) return g;
+    int n = fname[p + pat.size()] - '0';
+    if (n < 2 || n > 9) return g;
+    for (int i = 2; i <= n; i++) {
+        char suf[32];
+        snprintf(suf, sizeof(suf), "-000%02d-of-0000%d.gguf", i, n);
+        read_gguf_one(dir + fname.substr(0, p) + suf, g);
+    }
+    // derive MoE / hybrid-attention facts from ALL shards' tensor lists
+    if (!g.expert_per_layer_acc.empty()) {
+        g.is_moe = true;
+        g.n_expert_layers = (int)g.expert_per_layer_acc.size();
+        g.expert_bytes_total = g.expert_sum_acc;
+    }
+    if (!g.attn_ids_acc.empty()) {
+        g.n_kv_layers = (int)g.attn_ids_acc.size();
+        if (g.n_kv_layers > 0 && g.n_kv_layers <= g.n_layer) {
+            // +1 headroom: linear layers keep small fixed recurrent state
+            g.n_kv_layers = std::min(g.n_layer, g.n_kv_layers + 1);
+        }
+    }
+    // giant non-block tables (Qwen4-preview per-layer/n-gram embeddings: 28+ GB) cannot
+    // live on any GPU — they are row-gathered, so RAM streaming is cheap by design.
+    // Small families (output head, plain embeddings) stay on GPU.
+    for (auto& fam : g.nonblk_families) {
+        if (fam.second > 1.0e9) {
+            if (!g.nonblk_cpu_regex.empty()) g.nonblk_cpu_regex += "|";
+            g.nonblk_cpu_regex += fam.first;
+        } else {
+            g.nonblk_gpu_bytes += fam.second;
+        }
+    }
     return g;
+}
+
+static uint64_t model_file_size_all_shards(const std::string& model) {
+    uint64_t sz = file_size(model);
+    std::string dir, fname;
+    size_t slash = model.find_last_of('/');
+    if (slash == std::string::npos) { fname = model; }
+    else { dir = model.substr(0, slash + 1); fname = model.substr(slash + 1); }
+    const std::string pat = "-00001-of-0000";
+    size_t p = fname.find(pat);
+    if (p == std::string::npos || fname.size() < p + pat.size() + 1) return sz;
+    int n = fname[p + pat.size()] - '0';
+    if (n < 2 || n > 9) return sz;
+    for (int i = 2; i <= n; i++) {
+        char suf[32];
+        snprintf(suf, sizeof(suf), "-000%02d-of-0000%d.gguf", i, n);
+        sz += file_size(dir + fname.substr(0, p) + suf);
+    }
+    return sz;
 }
 
 static double kv_bytes_per_elem(const std::string& q) {
@@ -431,6 +498,9 @@ struct App {
     std::string lbin;
     std::string model_path(const std::string& name) const {
         if (name.find('/') != std::string::npos) return name;
+        // values may already carry the .gguf extension (e.g. MTP sidecars)
+        std::string raw = base + "/models/" + name;
+        if (file_exists(raw)) return raw;
         std::string p = base + "/models/" + name + ".gguf";
         if (file_exists(p)) return p;
         // multi-shard models: the user names the model, we resolve to shard 1
@@ -507,9 +577,15 @@ struct App {
 static VramPlan plan_vram(const App& app, const std::string& model) {
     VramPlan p{};
     GgufInfo g = read_gguf(model);
-    uint64_t model_size = file_size(model);
+    uint64_t model_size = model_file_size_all_shards(model);
     if (!g.ok || model_size == 0) {
-        p.ngl = app.cfg.geti("gpu_layers", 999);
+        // UNKNOWN/unparseable model: never assume it fits. ngl=999 with no plan
+        // behind it is exactly how a desktop dies. Fail safe to RAM, tell the user.
+        p.ngl = 0;
+        p.est_bytes = model_size;
+        std::cerr << "[vram-governor] WARNING: cannot parse " << model
+                  << " — failing safe to ngl=0 (all weights in RAM).\n"
+                  << "[vram-governor] Set gpu_layers manually in settings.txt to override.\n";
         return p;
     }
     uint64_t ctx = (uint64_t)app.cfg.geti("context", 40960);
@@ -550,8 +626,8 @@ static VramPlan plan_vram(const App& app, const std::string& model) {
         total > used ? total - used : 0);
     double total_free = total > used ? (double)(total - used) : 0.0;
     allowed_d = std::min(allowed_d, std::max(0.0, total_free - free_min_gb * 1024.0 * 1024.0 * 1024.0));
-    p.allowed_bytes = (uint64_t)std::max(0.0, allowed_d);
-    int n_layer = g.n_layer;
+    p.allowed_bytes = (uint64_t)std::max(0.0, allowed_d);    int n_layer = g.n_layer;
+
     // FULL-GPU shortcut: if the entire model + KV + compute fits the budget, put
     // everything on the GPU with no -ot tricks. On hybrid archs any CPU-resident
     // tensor (even FFN) streams RAM every token; total-GPU is a different speed class.
@@ -610,22 +686,42 @@ static VramPlan plan_vram(const App& app, const std::string& model) {
         // budget too small for smart mode: fall through to classic layer split
     }
     if (g.is_moe && g.n_expert_layers > 0) {
-        double other = (double)model_size - g.expert_bytes_total;
+        // `other` = everything that is not expert weights. The giant per-layer tables
+        // inside it stream from RAM, so only nonblk_gpu_bytes counts against VRAM.
+        double nonblk_cpu = g.nonblk_bytes - g.nonblk_gpu_bytes;
+        double other = (double)model_size - g.expert_bytes_total - nonblk_cpu;
         double epl = g.expert_bytes_total / g.n_expert_layers;
-        double avail = (double)p.allowed_bytes - other - kv_bytes - compute_bytes - margin;
-        int K = (int)(avail / epl);
+        // Fixed GPU cost = everything that stays on VRAM no matter how many expert
+        // layers we place: attention/ssm core, output head, KV cache, compute buffers.
+        // Analytic: other + kv + compute + margin. A measured floor is far better:
+        // run once with all experts offloaded (K=0) and put the engine's VRAM usage
+        // (GiB) into vram_fixed_gpu_gb — the planner then only spends what's REALLY left.
+        double fixed_gpu = other + kv_bytes + compute_bytes + margin;
+        double floor_gb = app.cfg.getf("vram_fixed_gpu_gb", 0.0);
+        if (floor_gb > 0) fixed_gpu = floor_gb * 1024.0 * 1024.0 * 1024.0;
+        double est_safety = app.cfg.getf("est_safety_pct", 1.10); // per-layer headroom
+        double budget_left = (double)p.allowed_bytes - fixed_gpu;
+        int K = budget_left > 0 ? (int)(budget_left / (epl * est_safety)) : 0;
         if (K < 0) K = 0;
         if (K > g.n_expert_layers) K = g.n_expert_layers;
         p.ngl = n_layer + 1;
         p.expert_cpu_from = K;
         p.n_expert_layers = g.n_expert_layers;
-        p.est_bytes = (uint64_t)(other + (double)K * epl + kv_bytes + compute_bytes + margin);
-        p.full_gpu = (K >= g.n_expert_layers);
-        if (other + kv_bytes + compute_bytes + margin > (double)p.allowed_bytes) {
-            p.ngl = n_layer;
-            p.expert_cpu_from = 0;
-            p.est_bytes = (uint64_t)(other + kv_bytes + compute_bytes + margin);
+        p.est_bytes = (uint64_t)(fixed_gpu + (double)K * epl);
+        p.full_gpu = (K >= g.n_expert_layers && nonblk_cpu == 0);
+        // combined -ot: giant tables first, then the CPU-resident expert layers
+        std::string re;
+        if (!g.nonblk_cpu_regex.empty()) re += g.nonblk_cpu_regex;
+        if (K < g.n_expert_layers) {
+            std::string layers;
+            for (int i = K; i < g.n_expert_layers; i++) {
+                if (!layers.empty()) layers += "|";
+                layers += std::to_string(i);
+            }
+            if (!re.empty()) re += "|";
+            re += "blk\\.(" + layers + ")\\..*exps";
         }
+        if (!re.empty()) p.ot_regex = re;
         return p;
     }
     p.ngl = 0;
@@ -662,6 +758,19 @@ static void report_plan(App& app, const std::string& model, const VramPlan& p) {
     if (p.ngl == 0) std::cerr << "[vram-governor] WARNING: model will run on CPU/RAM, too slow!\n";
 }
 
+// -ot regex that sends planned expert layers to CPU. expert_cpu_from==0 means ALL
+// expert layers stream from RAM (the 80B-class playbook) — the old code emitted NO
+// regex in that case, which told the engine to load every expert onto the GPU.
+static std::string expert_offload_regex(const VramPlan& p) {
+    if (p.expert_cpu_from <= 0) return "blk\\..*exps";
+    std::string layers;
+    for (int i = p.expert_cpu_from; i < p.n_expert_layers; i++) {
+        if (i > p.expert_cpu_from) layers += "|";
+        layers += std::to_string(i);
+    }
+    return "blk\\.(" + layers + ")\\..*exps";
+}
+
 static std::vector<char*> to_argv(const std::vector<std::string>& in) {
     std::vector<char*> out;
     for (auto& s : in) out.push_back(const_cast<char*>(s.c_str()));
@@ -693,9 +802,21 @@ static void gpu_args(App& app, const std::string& model, std::vector<std::string
         // explicit full-GPU mode: all weights+KV on the GPU. Fastest possible config for
         // models that fit; llama.cpp aborts safely (no sysmem fallback) if they don't.
         VramPlan probe = plan_vram(app, model);
-        // 2% slack: compute/MTP estimates are deliberately padded; empirical loads land
-        // ~0.5GB under estimate. Budget itself already enforces the hard VRAM limit.
-        if (probe.full_gpu || probe.est_bytes <= probe.allowed_bytes + probe.allowed_bytes * 0.02) {
+        // chokepoint: NO plan may exceed the budget. Every branch of plan_vram is
+        // supposed to guarantee this; if a future arch breaks that assumption we
+        // fail safe (all weights in RAM) instead of OOM-killing the desktop.
+        if (probe.est_bytes > probe.allowed_bytes + probe.allowed_bytes * 0.02) {
+            std::cerr << "[vram-governor] SAFETY: plan est " << probe.est_bytes / 1024 / 1024
+                      << " MiB > budget " << probe.allowed_bytes / 1024 / 1024
+                      << " MiB — failing safe to ngl=0\n";
+            probe.ngl = 0;
+            probe.ot_regex.clear();
+            probe.n_expert_layers = 0;
+            probe.full_gpu = false;
+            ngl = "0";
+        } else if (probe.full_gpu) {
+            // 2% slack: compute/MTP estimates are deliberately padded; empirical loads land
+            // ~0.5GB under estimate. Budget itself already enforces the hard VRAM limit.
             ngl = "999";
             std::cerr << "[vram-governor] full_gpu: whole model on GPU, est "
                       << probe.est_bytes / 1024 / 1024 << " MiB (budget "
@@ -710,25 +831,33 @@ static void gpu_args(App& app, const std::string& model, std::vector<std::string
                 std::cerr << "[vram-governor] smart -ot offloading " << probe.ot_regex.substr(0, 60) << "... =CPU\n";
                 v.push_back("-ot");
                 v.push_back(probe.ot_regex + "=CPU");
+            } else if (probe.n_expert_layers > 0 && probe.expert_cpu_from < probe.n_expert_layers) {
+                std::string re = expert_offload_regex(probe);
+                std::cerr << "[vram-governor] -ot \"" << re << "=CPU\"\n";
+                v.push_back("-ot");
+                v.push_back(re + "=CPU");
             }
         }
     } else if (!app.cfg.getb("auto_vram", true)) {
         ngl = std::to_string(app.cfg.geti("gpu_layers", 999));
     } else {
         VramPlan p2 = plan_vram(app, model);
+        if (p2.est_bytes > p2.allowed_bytes + p2.allowed_bytes * 0.02) {
+            std::cerr << "[vram-governor] SAFETY: plan est " << p2.est_bytes / 1024 / 1024
+                      << " MiB > budget " << p2.allowed_bytes / 1024 / 1024
+                      << " MiB — failing safe to ngl=0\n";
+            p2.ngl = 0;
+            p2.ot_regex.clear();
+            p2.n_expert_layers = 0;
+        }
         report_plan(app, model, p2);
         ngl = std::to_string(p2.ngl);
         if (!p2.ot_regex.empty()) {
             std::cerr << "[vram-governor] smart -ot offloading " << p2.ot_regex.substr(0, 60) << "... =CPU\n";
             v.push_back("-ot");
             v.push_back(p2.ot_regex + "=CPU");
-        } else if (p2.n_expert_layers > 0 && p2.expert_cpu_from > 0 && p2.expert_cpu_from < p2.n_expert_layers) {
-            std::string layers;
-            for (int i = p2.expert_cpu_from; i < p2.n_expert_layers; i++) {
-                if (i > p2.expert_cpu_from) layers += "|";
-                layers += std::to_string(i);
-            }
-            std::string re = "blk\\.(" + layers + ")\\..*exps";
+        } else if (p2.n_expert_layers > 0 && p2.expert_cpu_from < p2.n_expert_layers) {
+            std::string re = expert_offload_regex(p2);
             std::cerr << "[vram-governor] -ot \"" << re << "=CPU\"\n";
             v.push_back("-ot");
             v.push_back(re + "=CPU");
@@ -851,12 +980,12 @@ static void cmd_serve(App& app, const std::vector<std::string>& extra) {
     // the server cleanly instead of letting the driver thrash/freeze the desktop.
     // Budget-side enforcement happens in plan_vram (vram_limit_gb); this is the last resort.
     if (srv > 0 && app.cfg.getb("vram_guard", true)) {
-        double em = app.cfg.getf("vram_emergency_pct", 0.995f);
+        double em = app.cfg.getf("vram_emergency_pct", 0.95f); // 95%: the 0.2s poll can't outrun a load spike; the plan-side budget is the real enforcement
         pid_t guard = fork();
         if (guard == 0) {
             uint64_t total = amd_vram_total();
             while (true) {
-                usleep(500 * 1000);
+                usleep(200 * 1000);
                 if (kill(srv, 0) != 0) _exit(0); // server already gone
                 uint64_t used = amd_vram_used();
                 if (total > 0 && used >= (uint64_t)((double)total * em)) {
