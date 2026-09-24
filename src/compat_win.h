@@ -12,7 +12,7 @@
 #ifdef _WIN32
 
 #include <windows.h>
-#include <dxgi1_4.h>
+#include <dxgi1_6.h>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>

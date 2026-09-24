@@ -15,7 +15,9 @@
 #include <sys/wait.h>
 #endif
 #include "compat_win.h"
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <vector>
 #include <limits.h>
 #include <cstdint>
