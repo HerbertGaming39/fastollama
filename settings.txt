@@ -98,9 +98,11 @@ flash_attn = 1
 #   For Qwen3.8-27B use: spec_type = draft-mtp + mtp_model = mtp-Qwen3.8-27B-Q4_0
 # spec_type = draft: classic small-draft-model speculative decoding.
 # spec_type = off (or empty + speculative = 0) disables it.
-spec_type = off
+# spec_type = ngram: n-gram speculation (no draft model; this fork hardwires
+# draft ctx = main ctx, so a real drafter at 262K would cost ~9 GB KV).
+spec_type = ngram
 mtp_model = mtp-Qwen3.8-27B-Q4_0
-draft_max = 2
+draft_max = 8
 draft_min = 1
 # legacy switch for spec_type = draft (ignored when spec_type = draft-mtp)
 speculative = 0
@@ -143,7 +145,7 @@ full_gpu = 1
 vram_fixed_gpu_gb = 4.25
 # per-expert-layer headroom when packing layers into VRAM (1.05 = 5%). The 95%
 # emergency watchdog catches any real overshoot, so this can be tighter than before.
-est_safety_pct = 1.05
+est_safety_pct = 1.02
 # RAM budget: if the part of the model that must live in system RAM doesn't fit
 # (RAM minus this reserve), fastollama refuses to start instead of freezing the
 # whole desktop with disk thrashing. Set allow_disk_stream = 1 to override.
@@ -151,7 +153,7 @@ ram_reserve_gb = 4
 allow_disk_stream = 0
 
 # --- Hybrid offload latency (MoE CPU expert layers) ---
-# prio 2 = high CPU priority for expert math; poll 100 = spin-wait between
-# backend hops (with 30 CPU expert layers the graph hops backends ~60x/token).
-prio = 2
+# prio needs OS privileges (setpriority) - left off. poll 100 = spin-wait between
+# backend hops (with ~29 CPU expert layers the graph hops backends ~60x/token).
+prio = -1
 poll = 100

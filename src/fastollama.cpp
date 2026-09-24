@@ -989,6 +989,17 @@ static std::vector<std::string> model_args(App& app, bool want_draft) {
         v.push_back(std::to_string(app.cfg.geti("draft_min", 4)));
         v.push_back("--spec-draft-p-min");
         v.push_back(std::to_string(app.cfg.getf("draft_p_min", 0.75f)));
+    } else if (spec_type == "ngram") {
+        // ngram speculation: drafts continuations from recently seen token n-grams.
+        // NO draft model -> NO draft KV (this fork hardwires draft ctx = target ctx,
+        // so a real drafter at 262K would cost gigabytes). Free to try, big wins on
+        // code/repetitive text; output stays exact (target samples every token).
+        v.push_back("--spec-type");
+        v.push_back("ngram-simple");
+        int nmax = app.cfg.geti("draft_max", 8);
+        if (nmax > 0) { v.push_back("--spec-draft-n-max"); v.push_back(std::to_string(nmax)); }
+        int nmin = app.cfg.geti("draft_min", 1);
+        if (nmin > 0) { v.push_back("--spec-draft-n-min"); v.push_back(std::to_string(nmin)); }
     }
     if (app.cfg.getb("yarn", false)) {
         v.push_back("--rope-scaling"); v.push_back("yarn");
