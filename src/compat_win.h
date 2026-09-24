@@ -11,8 +11,15 @@
 
 #ifdef _WIN32
 
+#ifndef NOMINMAX
+#define NOMINMAX // windows.h min/max macros break std::min/std::max
+#endif
 #include <windows.h>
 #include <dxgi1_6.h>
+
+#ifndef S_ISREG
+#define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
+#endif
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
