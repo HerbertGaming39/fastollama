@@ -37,7 +37,7 @@ jobs:
           Expand-Archive -Path engine.zip -DestinationPath engine
           $bin = Get-ChildItem engine -Recurse -Filter "llama-server.exe" | Select-Object -First 1
           $engineDir = Split-Path $bin.FullName
-          New-Item -ItemType Directory -Force -Path installer/llama.cpp/build-vk | Out-Null
+          New-Item -ItemType Directory -Force -Path installer/llama.cpp/build-vk/bin | Out-Null
           Copy-Item "$engineDir/*" installer/llama.cpp/build-vk/bin/ -Recurse -Force
 
       - name: Assemble installer
