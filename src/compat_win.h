@@ -89,9 +89,8 @@ static inline uint64_t amd_vram_used_dxgi() {
     IDXGIAdapter3* a3 = nullptr;
     if (SUCCEEDED(ad->QueryInterface(__uuidof(IDXGIAdapter3), (void**)&a3))) {
         DXGI_QUERY_VIDEO_MEMORY_INFO info{};
-        // some MinGW headers lack the DXGI_QUERY_VIDEO_MEMORY_INFO_TYPE_CURRENT
-        // enum member name; per Microsoft docs its value is 0.
-        if (SUCCEEDED(a3->QueryVideoMemoryInfo(0, (DXGI_QUERY_VIDEO_MEMORY_INFO_TYPE)0, &info)))
+        // LOCAL segment = the adapter's dedicated VRAM on discrete cards
+        if (SUCCEEDED(a3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)))
             used = info.CurrentUsage;
         a3->Release();
     }
