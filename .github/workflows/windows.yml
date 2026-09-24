@@ -11,10 +11,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build fastollama.exe (MinGW g++)
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build fastollama.exe (MSVC)
         shell: pwsh
         run: |
-          g++ -O2 -std=c++17 -Wall -o bin/fastollama.exe src/fastollama.cpp -ldxgi -luuid
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          cl /nologo /O2 /std:c++17 /EHsc /utf-8 /Fe:bin\fastollama.exe src\fastollama.cpp
           if (!(Test-Path bin/fastollama.exe)) { throw "build failed" }
 
       - name: Fetch official llama.cpp Vulkan binaries
