@@ -937,6 +937,14 @@ static std::vector<std::string> model_args(App& app, bool want_draft) {
     gpu_args(app, m, v);
     v.push_back("-t");
     v.push_back(std::to_string(app.cfg.geti("threads", 16)));
+    // prio/poll: cut wakeup latency + preemption for the CPU side of the hybrid
+    // GPU/CPU graph. With MoE offload the graph hops backends every CPU expert
+    // layer ~2x48 times per token; every futex sleep there costs micro-seconds
+    // to milliseconds. prio 2 (high) + poll 100 (spin-wait) removes both.
+    int prio = app.cfg.geti("prio", -1);
+    if (prio >= 0) { v.push_back("--prio"); v.push_back(std::to_string(prio)); }
+    int poll = app.cfg.geti("poll", -1);
+    if (poll >= 0) { v.push_back("--poll"); v.push_back(std::to_string(poll)); }
     v.push_back("-tb");
     v.push_back(std::to_string(app.cfg.geti("threads_batch", 16)));
     v.push_back("-b");

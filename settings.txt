@@ -81,9 +81,10 @@ no_context_shift = 0
 
 # --- Speed ---
 # CPU threads: MEASURED on 9700X (Zen5, SMT) for Qwen3-Next-80B MoE @ 30 CPU expert
-# layers: 8T = 33 t/s, 12T = 32 t/s, 16T = 29 t/s. SMT hurts MoE CPU math; 8 wins.
-threads = 8
-threads_batch = 8
+# layers: 4T=32, 6T=34, 8T=34, 12T=32, 16T=29 t/s. Expert math is RAM-bound:
+# 6 threads wins and leaves 10 cores for the desktop.
+threads = 6
+threads_batch = 6
 batch = 2048
 ubatch = 1024
 
@@ -148,3 +149,9 @@ est_safety_pct = 1.05
 # whole desktop with disk thrashing. Set allow_disk_stream = 1 to override.
 ram_reserve_gb = 4
 allow_disk_stream = 0
+
+# --- Hybrid offload latency (MoE CPU expert layers) ---
+# prio 2 = high CPU priority for expert math; poll 100 = spin-wait between
+# backend hops (with 30 CPU expert layers the graph hops backends ~60x/token).
+prio = 2
+poll = 100
