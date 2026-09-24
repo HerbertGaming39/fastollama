@@ -370,15 +370,21 @@ static GgufInfo read_gguf(const std::string& path) {
     else { dir = path.substr(0, slash + 1); fname = path.substr(slash + 1); }
     const std::string pat = "-00001-of-0000";
     size_t p = fname.find(pat);
-    if (p == std::string::npos || fname.size() < p + pat.size() + 1) return g;
-    int n = fname[p + pat.size()] - '0';
-    if (n < 2 || n > 9) return g;
-    for (int i = 2; i <= n; i++) {
-        char suf[32];
-        snprintf(suf, sizeof(suf), "-000%02d-of-0000%d.gguf", i, n);
-        read_gguf_one(dir + fname.substr(0, p) + suf, g);
+    if (p != std::string::npos && fname.size() >= p + pat.size() + 1) {
+        int n = fname[p + pat.size()] - '0';
+        if (n >= 2 && n <= 9) {
+            for (int i = 2; i <= n; i++) {
+                char suf[32];
+                snprintf(suf, sizeof(suf), "-000%02d-of-0000%d.gguf", i, n);
+                read_gguf_one(dir + fname.substr(0, p) + suf, g);
+            }
+        }
     }
-    // derive MoE / hybrid-attention facts from ALL shards' tensor lists
+    // derive MoE / hybrid-attention facts from ALL shards' tensor lists.
+    // Runs for SINGLE-FILE models too: qwen3next-80B is one 26 GB file, and before
+    // this fix its 72 GB of ffn_*_exps tensors were never folded in -> is_moe=false
+    // -> the planner treated all 48 layers as dense+KV, over-estimated KV ~4x and
+    // offloaded far too much (huge speed loss with VRAM left idle).
     if (!g.expert_per_layer_acc.empty()) {
         g.is_moe = true;
         g.n_expert_layers = (int)g.expert_per_layer_acc.size();
@@ -475,6 +481,18 @@ static uint64_t amd_vram_used() {
 }
 
 static uint64_t ram_available_bytes() {
+    // MemAvailable (kernel's own reclaimable-cache-aware estimate) is the right
+    // metric: _SC_AVPHYS_PAGES excludes page cache, so a freshly-downloaded model
+    // file filling the cache looks like "no RAM free" even though mmap of that
+    // same file would reuse those exact pages.
+    std::ifstream mi("/proc/meminfo");
+    std::string key;
+    long kb = -1;
+    while (mi >> key) {
+        if (key == "MemAvailable:") { mi >> kb; break; }
+        mi.ignore(1 << 16, '\n');
+    }
+    if (kb > 0) return (uint64_t)kb * 1024ull;
     long pages = sysconf(_SC_AVPHYS_PAGES);
     long psize = sysconf(_SC_PAGESIZE);
     if (pages <= 0 || psize <= 0) return 0;
@@ -753,7 +771,10 @@ static VramPlan plan_vram(const App& app, const std::string& model) {
                 layers += std::to_string(i);
             }
             if (!re.empty()) re += "|";
-            re += "blk\\.(" + layers + ")\\..*exps";
+            // ffn_.*_exps matches ffn_{up,gate,down}_exps (routed, per-token-chosen)
+            // but NOT ffn_*_shexp: shared experts fire on EVERY token and are tiny,
+            // so they belong on the GPU next to the layer's other hot tensors.
+            re += "blk\\.(" + layers + ")\\.ffn_.*_exps";
         }
         if (!re.empty()) p.ot_regex = re;
         return p;
@@ -796,13 +817,13 @@ static void report_plan(App& app, const std::string& model, const VramPlan& p) {
 // expert layers stream from RAM (the 80B-class playbook) — the old code emitted NO
 // regex in that case, which told the engine to load every expert onto the GPU.
 static std::string expert_offload_regex(const VramPlan& p) {
-    if (p.expert_cpu_from <= 0) return "blk\\..*exps";
+    if (p.expert_cpu_from <= 0) return "blk\\.ffn_.*_exps"; // routed experts only:
     std::string layers;
     for (int i = p.expert_cpu_from; i < p.n_expert_layers; i++) {
         if (i > p.expert_cpu_from) layers += "|";
         layers += std::to_string(i);
     }
-    return "blk\\.(" + layers + ")\\..*exps";
+    return "blk\\.(" + layers + ")\\.ffn_.*_exps";
 }
 
 static std::vector<char*> to_argv(const std::vector<std::string>& in) {
@@ -858,9 +879,10 @@ static void gpu_args(App& app, const std::string& model, std::vector<std::string
                       << probe.est_bytes / 1024 / 1024 << " MiB (budget "
                       << probe.allowed_bytes / 1024 / 1024 << " MiB)\n";
         } else {
-            std::cerr << "[vram-governor] full_gpu=1 but model+KV est "
-                      << probe.est_bytes / 1024 / 1024 << " MiB > budget "
-                      << probe.allowed_bytes / 1024 / 1024 << " MiB -> governor split\n";
+            std::cerr << "[vram-governor] governor split: K=" << probe.expert_cpu_from
+                      << "/" << probe.n_expert_layers << " expert layers fit VRAM (est "
+                      << probe.est_bytes / 1024 / 1024 << " MiB <= budget "
+                      << probe.allowed_bytes / 1024 / 1024 << " MiB)\n";
             report_plan(app, model, probe);
             if (!ram_feasible_or_die(app, model, probe.est_bytes)) exit(1);
             ngl = std::to_string(probe.ngl);
@@ -968,8 +990,12 @@ static std::vector<std::string> model_args(App& app, bool want_draft) {
             v.push_back("--yarn-orig-ctx"); v.push_back("40960");
         }
     }
-    if (app.cfg.getb("mlock", false)) v.push_back("--mlock");
-    if (app.cfg.getb("no_mmap", false)) v.push_back("--no-mmap");
+    // new llama.cpp replaced --mlock/--no-mmap with --load-mode none (a normal
+    // malloc'd, fully-read load — no page faults while generating).
+    if (app.cfg.getb("mlock", false) || app.cfg.getb("no_mmap", false)) {
+        v.push_back("--load-mode");
+        v.push_back("none");
+    }
     // defrag: deprecated upstream (auto-defrag now); kept as no-op for old settings
     if (app.cfg.getf("defrag", 0.1f) <= 0.0f) { /* 0 = off, nothing to do */ }
     if (app.cfg.getb("kv_unified", false)) v.push_back("--kv-unified");

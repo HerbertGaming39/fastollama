@@ -49,18 +49,18 @@ Full **262,144-token context** (native max), VRAM capped at 15 GB so the desktop
 |---|---|---|---|---|---|
 | **Qwen3.8-27B-UD-IQ2_S** | 262144 | **71–86** | ~1000 | 14.4 GB | full_gpu |
 | Qwen3.8-27B-UD-IQ1_M (max speed) | 262144 | **90–92** | 184 | 14.5 GB | full_gpu |
-| **Qwen3-Next-80B-A3B-UD-IQ2_XXS** | 262144 | **36–38** | 808 | 14.5 GB | full_gpu |
+| **Qwen3-Next-80B-A3B-UD-IQ2_XXS** | 262144 | **33** (8T) | ~800 | 13.8 GB | expert split (18/48 expert layers on GPU) |
 | Qwen3.8-Flash-Next-UD-IQ1_S (177B-class Qwen4-preview arch) | 262144 | **4.0** | 119 | **14.1 GB** | expert split (44/48 experts in RAM) |
 | Qwen3-30B-A3B-UD-Q4_K_XL (MoE) | 262144 | 30.5 | 105 | 13.5 GB | expert split |
 | Qwen3.8-27B-UD-Q4_K_XL (max quality) | 262144 | 6.9 | 27 | 13.4 GB | smart split |
 
-An 80-billion-parameter model at full 256K context, faster per token than the dense 27B, on a 16 GB card — that is the whole point of fastollama.
+An 80-billion-parameter model at full 256K context on a 16 GB card — while the desktop stays usable — that is the whole point of fastollama.
 
 ### The one rule that explains every number
 
 > **Any CPU-resident tensor — even FFN weights — collapses a dense model to single-digit t/s. A fully-GPU quant is a different speed class, not an increment.**
 
-A dense model reads all of its weights for every generated token. The 27B IQ2_S (8.4 GB fully on GPU) runs 86 t/s ≈ 715 GB/s ≈ the card's memory bus — bandwidth-bound, i.e. maximally optimized. The same model 2.5 GB bigger (IQ3_XXS) spills to RAM and drops to 4.5 t/s. MoE flips the math: only ~3B params activate per token, so streaming experts from system RAM is cheap — hence the 80B at 36 t/s.
+A dense model reads all of its weights for every generated token. The 27B IQ2_S (8.4 GB fully on GPU) runs 86 t/s ≈ 715 GB/s ≈ the card's memory bus — bandwidth-bound, i.e. maximally optimized. The same model 2.5 GB bigger (IQ3_XXS) spills to RAM and drops to 4.5 t/s. MoE flips the math: only ~3B params activate per token, so streaming experts from system RAM is cheap — the 80B at 262K does 33 t/s with 30 of 48 expert layers in RAM (30 layers × ~14 MB/token ≈ 420 MB/token over ~65 GB/s DDR5 = the floor; measured 8T=33, 12T=32, 16T=29 — SMT hurts MoE CPU math).
 
 The governor exists to get you into the right class automatically: `model = auto` walks the quant ladder and picks the largest quant that fits 100% on GPU, and `full_gpu = 1` falls back to a smart split (never an OOM) when nothing fits.
 

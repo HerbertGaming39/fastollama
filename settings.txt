@@ -6,7 +6,7 @@
 # Model name inside models/ folder (without .gguf) or full path
 # quant guide: q8_0 = best quality/slowest, q6_k, q5_k_m, q4_k_m = fast, iq3/q3 = max speed
 # auto = walk the quant ladder, pick the biggest that fits the VRAM budget
-model = auto
+model = Qwen3-Next-80B-A3B-Instruct-UD-IQ2_XXS.gguf
 
 # MEASURED on this PC (full 262144 context, VRAM <= 15 GB, MTP on, full_gpu = 1):
 #   Qwen3.8-27B-UD-IQ2_S      80-86 t/s gen / 1000 t/s pp  <-- DEFAULT: whole 27B on GPU!
@@ -62,8 +62,10 @@ context = 262144
 kv_cache = q4_0
 
 # mlock = 1 pins model in RAM so it never swaps. no_mmap = 1 loads fully to RAM first.
-mlock = 0
-no_mmap = 0
+# no_mmap+mlock: -ot CPU expert tensors get a contiguous pinned RAM copy -> no page
+# faults during generation (engine log explicitly recommended load-mode none for -ot).
+mlock = 1
+no_mmap = 1
 
 # defrag threshold: compact fragmented KV cache when free slots drop below (0 = off)
 defrag = 0.1
@@ -78,10 +80,10 @@ cache_reuse = 256
 no_context_shift = 0
 
 # --- Speed ---
-# CPU threads: 16 = all cores for dense-on-GPU prompt processing; lower (4-8)
-# leaves headroom for the desktop when layers spill to RAM
-threads = 16
-threads_batch = 16
+# CPU threads: MEASURED on 9700X (Zen5, SMT) for Qwen3-Next-80B MoE @ 30 CPU expert
+# layers: 8T = 33 t/s, 12T = 32 t/s, 16T = 29 t/s. SMT hurts MoE CPU math; 8 wins.
+threads = 8
+threads_batch = 8
 batch = 2048
 ubatch = 1024
 
@@ -133,9 +135,14 @@ bench_reps = 3
 # full_gpu = 1: force the WHOLE model + KV on the GPU (fastest; needs quant that fits)
 # governor auto-falls-back to smart split if it does not fit
 full_gpu = 1
-# calibrated: measured engine VRAM floor with all experts offloaded (K=0) on this
-# machine: Qwen3.8-Flash-Next @ 262K = 10.1 GiB. Planner spends only what's really left.
-vram_fixed_gpu_gb = 10.1
+# calibrated: measured engine VRAM floor with experts offloaded on this machine.
+# Qwen3-Next-80B IQ2_XXS @ 262K: engine fixed (attn+ssm+KV+compute+output) = 4.25 GiB
+# measured 2026-09-24 (K=9 run: 9.7 GiB total - 1.1 desktop - 4.3 experts).
+# Planner spends only what's really left above this floor.
+vram_fixed_gpu_gb = 4.25
+# per-expert-layer headroom when packing layers into VRAM (1.05 = 5%). The 95%
+# emergency watchdog catches any real overshoot, so this can be tighter than before.
+est_safety_pct = 1.05
 # RAM budget: if the part of the model that must live in system RAM doesn't fit
 # (RAM minus this reserve), fastollama refuses to start instead of freezing the
 # whole desktop with disk thrashing. Set allow_disk_stream = 1 to override.
