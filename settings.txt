@@ -55,7 +55,7 @@ gpu_layers = 999
 # --- Context / memory ---
 # context = 262144 -> Qwen3.8-27B native max (no yarn needed)
 # context = 40960  -> Qwen3-8B native max
-context = 131072
+context = 262144
 
 # kv_cache: f16 = full quality / most VRAM, q8_0 = ~2x smaller (~0.1% loss),
 # q4_0 = 4x smaller (use for 256k context; needed so most layers stay on GPU)
