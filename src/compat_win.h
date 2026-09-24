@@ -23,7 +23,6 @@
 #ifndef PATH_MAX
 #define PATH_MAX MAX_PATH
 #endif
-#define usleep(us) Sleep((DWORD)((us) / 1000))
 #define popen  _popen
 #define pclose _pclose
 
@@ -90,7 +89,9 @@ static inline uint64_t amd_vram_used_dxgi() {
     IDXGIAdapter3* a3 = nullptr;
     if (SUCCEEDED(ad->QueryInterface(__uuidof(IDXGIAdapter3), (void**)&a3))) {
         DXGI_QUERY_VIDEO_MEMORY_INFO info{};
-        if (SUCCEEDED(a3->QueryVideoMemoryInfo(0, DXGI_QUERY_VIDEO_MEMORY_INFO_TYPE_CURRENT, &info)))
+        // some MinGW headers lack the DXGI_QUERY_VIDEO_MEMORY_INFO_TYPE_CURRENT
+        // enum member name; per Microsoft docs its value is 0.
+        if (SUCCEEDED(a3->QueryVideoMemoryInfo(0, (DXGI_QUERY_VIDEO_MEMORY_INFO_TYPE)0, &info)))
             used = info.CurrentUsage;
         a3->Release();
     }
