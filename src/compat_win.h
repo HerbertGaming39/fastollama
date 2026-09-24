@@ -126,6 +126,7 @@ static inline bool win_disk_free_bytes(const char* path, uint64_t* out) {
 }
 
 // ---- process helpers ----
+typedef int pid_t; // Windows "pid" = int process id; call sites stay unchanged
 struct WinProc { HANDLE h = nullptr; DWORD pid = 0; };
 
 static inline std::string win_quote(const std::string& s) {

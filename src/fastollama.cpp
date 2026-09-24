@@ -1145,14 +1145,32 @@ static void cmd_serve(App& app, const std::vector<std::string>& extra) {
     v.insert(v.end(), extra.begin(), extra.end());
     std::cerr << "fastollama serving " << m << " -> http://" << app.cfg.get("host", "127.0.0.1")
               << ":" << app.cfg.geti("port", 8080) << "\n";
-    pid_t srv = run(v);
     // VRAM guard dog: llama-server has no --vram-limit flag, so we enforce it from the
     // outside. If VRAM use crosses the emergency line (default 99.5% of total) we stop
     // the server cleanly instead of letting the driver thrash/freeze the desktop.
     // Budget-side enforcement happens in plan_vram (vram_limit_gb); this is the last resort.
+    // NOTE: the guard must start BEFORE we block on the server. run(v) used to wait
+    // first, which made the watchdog dead code on Linux - fixed by spawning directly.
+#ifdef _WIN32
+    {
+        WinProc wp = win_spawn(v);
+        if (!wp.h) { std::cerr << "failed to start " << v[0] << "\n"; exit(1); }
+        if (app.cfg.getb("vram_guard", true)) {
+            static VramGuardCtx gctx;
+            gctx.srv = (uint64_t)wp.pid;
+            gctx.em = app.cfg.getf("vram_emergency_pct", 0.95f);
+            CreateThread(nullptr, 0, vram_guard_thread, &gctx, 0, nullptr);
+        }
+        DWORD code = 0;
+        WaitForSingleObject(wp.h, INFINITE);
+        GetExitCodeProcess(wp.h, &code);
+        CloseHandle(wp.h);
+        exit((int)code);
+    }
+#else
+    pid_t srv = run(v, false);
     if (srv > 0 && app.cfg.getb("vram_guard", true)) {
         double em = app.cfg.getf("vram_emergency_pct", 0.95f); // 95%: the 0.2s poll can't outrun a load spike; the plan-side budget is the real enforcement
-#ifndef _WIN32
         pid_t guard = fork();
         if (guard == 0) {
             uint64_t total = amd_vram_total();
@@ -1170,13 +1188,11 @@ static void cmd_serve(App& app, const std::vector<std::string>& extra) {
                 }
             }
         }
-#else
-        static VramGuardCtx gctx;
-        gctx.srv = (uint64_t)srv;
-        gctx.em = em;
-        CreateThread(nullptr, 0, vram_guard_thread, &gctx, 0, nullptr);
-#endif
     }
+    int st = 0;
+    waitpid(srv, &st, 0);
+    if (WIFEXITED(st) && WEXITSTATUS(st) != 0) exit(WEXITSTATUS(st));
+#endif
 }
 
 static void cmd_chat(App& app, const std::vector<std::string>& extra) {
