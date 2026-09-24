@@ -6,7 +6,7 @@
 # Model name inside models/ folder (without .gguf) or full path
 # quant guide: q8_0 = best quality/slowest, q6_k, q5_k_m, q4_k_m = fast, iq3/q3 = max speed
 # auto = walk the quant ladder, pick the biggest that fits the VRAM budget
-model = Qwen3-Next-80B-A3B-Instruct-UD-IQ2_XXS.gguf
+model = Qwen3.8-27B-UD-IQ2_XXS
 
 # MEASURED on this PC (full 262144 context, VRAM <= 15 GB, MTP on, full_gpu = 1):
 #   Qwen3.8-27B-UD-IQ2_S      80-86 t/s gen / 1000 t/s pp  <-- DEFAULT: whole 27B on GPU!
@@ -37,8 +37,8 @@ backend = vulkan
 # compute-buffer sizes and picks the layer split for you. Whole layers spill
 # to your 32 GB RAM automatically instead of OOM-crashing GNOME.
 # Set auto_vram = 0 to use the fixed gpu_layers value below instead.
-vram_limit_gb = 14
-vram_free_min_gb = 1.3
+vram_limit_gb = 15.0
+vram_free_min_gb = 0.6
 # Last-resort watchdog: if VRAM use ever crosses vram_emergency_pct of total
 # (driver peak, leak, second app grabbing memory) the server is stopped cleanly
 # instead of freezing GNOME. vram_guard = 0 disables.
@@ -55,7 +55,7 @@ gpu_layers = 999
 # --- Context / memory ---
 # context = 262144 -> Qwen3.8-27B native max (no yarn needed)
 # context = 40960  -> Qwen3-8B native max
-context = 262144
+context = 131072
 
 # kv_cache: f16 = full quality / most VRAM, q8_0 = ~2x smaller (~0.1% loss),
 # q4_0 = 4x smaller (use for 256k context; needed so most layers stay on GPU)
@@ -115,7 +115,7 @@ draft_min = 1
 draft_p_min = 0.6
 # legacy switch for spec_type = draft (ignored when spec_type = draft-mtp)
 speculative = 0
-draft_model = Qwen3-0.6B-IQ4_XS
+# draft_model = Qwen3-0.6B-IQ4_XS
 draft_p_min = 0.75
 
 # --- Long context (Qwen3 131k) ---

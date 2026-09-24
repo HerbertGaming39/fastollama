@@ -47,12 +47,23 @@ Full **262,144-token context** (native max), VRAM capped at 15 GB so the desktop
 
 | model | context | gen t/s | prompt t/s | VRAM (engine) | mode |
 |---|---|---|---|---|---|
-| **Qwen3.8-27B-UD-IQ2_S** | 262144 | **71–86** | ~1000 | 14.4 GB | full_gpu |
-| Qwen3.8-27B-UD-IQ1_M (max speed) | 262144 | **90–92** | 184 | 14.5 GB | full_gpu |
-| **Qwen3-Next-80B-A3B-UD-IQ2_XXS** | 262144 | **34** (6T) | ~800 | 13.8 GB | expert split (18/48 expert layers on GPU) |
-| Qwen3.8-Flash-Next-UD-IQ1_S (177B-class Qwen4-preview arch) | 262144 | **4.0** | 119 | **14.1 GB** | expert split (44/48 experts in RAM) |
-| Qwen3-30B-A3B-UD-Q4_K_XL (MoE) | 262144 | 30.5 | 105 | 13.5 GB | expert split |
-| Qwen3.8-27B-UD-Q4_K_XL (max quality) | 262144 | 6.9 | 27 | 13.4 GB | smart split |
+| **Qwen3.8-27B-UD-IQ2_S*** | 131072 | **45–48** | ~64 | 12.2 GB | full_gpu |
+| **Qwen3-Next-80B-A3B-UD-IQ2_XXS*** | 262144 | **32–35** | ~55 | 13.8 GB | expert split (19/48 expert layers on GPU) |
+| Qwen3.8-27B-UD-IQ1_M (max speed) | 262144 | 90–92† | 184 | 14.5 GB | full_gpu |
+| Qwen3.8-Flash-Next-UD-IQ1_S (177B-class Qwen4-preview arch) | 262144 | 4.0† | 119 | 14.1 GB | expert split (44/48 experts in RAM) |
+| Qwen3-30B-A3B-UD-Q4_K_XL (MoE) | 262144 | 30.5† | 105 | 13.5 GB | expert split |
+| Qwen3.8-27B-UD-Q4_K_XL (max quality) | 262144 | 6.9† | 27 | 13.4 GB | smart split |
+
+\* re-measured 2026-09-24 on the current engine build (6 threads, poll 100, ngram spec).
+\† measured on an older engine build; the current fork is slower per token — treat these as history, not promises.
+
+Notes from the 2026-09-24 tuning session:
+- **Threads:** MoE CPU-expert math is RAM-bandwidth-bound — fewer threads win on 9700X (6T ≈ 8T > 12T > 16T).
+- **MTP** (`spec_type = draft-mtp`) is pathologically slow on the current fork build (~10 t/s); keep it off.
+- **Ngram speculation** helps on repetitive text (+10 t/s sections) and costs nothing otherwise.
+- **Draft-model speculation** needs matching vocab: works for Qwen3-Next-80B + Qwen3-0.6B (same 152k vocab,
+  requires the `FASTOLLAMA_DRAFT_CTX` patch in `patches/`), does NOT work for Qwen3.8-27B (248k vocab — no drafter exists).
+- RADV Vulkan can wedge after many heavy loads (`Not enough memory for command submission`); a reboot clears it.
 
 An 80-billion-parameter model at full 256K context on a 16 GB card — while the desktop stays usable — that is the whole point of fastollama.
 
@@ -96,7 +107,26 @@ The governor exists to get you into the right class automatically: `model = auto
 ```bash
 bin/fastollama pull qwen3.8-27b-iq2s --set   # 27B dense, best balance (8.4 GB)
 bin/fastollama pull qwen3.8-27b-iq1m --set   # 27B max speed tier
+bin/fastollama pull qwen3.8-27b-iq2xxs --set # 27B max speed on current engine (7.0 GB)
 bin/fastollama pull qwen3-next-80b   --set   # 80B MoE (26.2 GB)
+
+## Windows install
+
+A GitHub Actions workflow (`.github/workflows/windows.yml`) builds
+`fastollama.exe` and packages it with the official llama.cpp Vulkan binaries
+into `fastollama-windows-x64.zip` on every `v*` tag (or manual run from the
+Actions tab). The ZIP contains `install.ps1`:
+
+```powershell
+Expand-Archive fastollama-windows-x64.zip
+cd fastollama-windows-x64
+powershell -ExecutionPolicy Bypass -File install.ps1   # no admin needed
+fastollama pull qwen3.8-27b-iq2s --set
+fastollama serve                                       # http://127.0.0.1:8080
+```
+
+The Windows port has the same governors: VRAM via DXGI, RAM via
+GlobalMemoryStatusEx, the 95% watchdog included.
 bin/fastollama pull flash-next-iq1s   --set  # 177B-class Qwen4-preview arch (74 GB, 3 shards)
 bin/fastollama pull llama3.1-8b      --set   # non-Qwen works too
 bin/fastollama pull gemma3-27b       --set

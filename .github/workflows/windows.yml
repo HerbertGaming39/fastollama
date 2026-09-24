@@ -1,0 +1,82 @@
+name: build-windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build fastollama.exe (MinGW g++)
+        shell: pwsh
+        run: |
+          g++ -O2 -std=c++17 -Wall -o bin/fastollama.exe src/fastollama.cpp -ldxgi -luuid
+          if (!(Test-Path bin/fastollama.exe)) { throw "build failed" }
+
+      - name: Fetch official llama.cpp Vulkan binaries
+        shell: pwsh
+        run: |
+          $r = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+          $asset = $r.assets | Where-Object { $_.name -match "bin-win-vulkan-x64" } | Select-Object -First 1
+          if (!$asset) { throw "no vulkan asset found" }
+          Write-Host "downloading $($asset.name)"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile engine.zip
+          Expand-Archive -Path engine.zip -DestinationPath engine
+          $bin = Get-ChildItem engine -Recurse -Filter "llama-server.exe" | Select-Object -First 1
+          $engineDir = Split-Path $bin.FullName
+          New-Item -ItemType Directory -Force -Path installer/llama.cpp/build-vk | Out-Null
+          Copy-Item "$engineDir/*" installer/llama.cpp/build-vk/bin/ -Recurse -Force
+
+      - name: Assemble installer
+        shell: pwsh
+        run: |
+          Copy-Item bin/fastollama.exe installer/
+          Copy-Item settings.txt installer/
+          Copy-Item README.md installer/ -ErrorAction SilentlyContinue
+          $install = @'
+          # fastollama Windows installer
+          # - copies fastollama.exe, settings.txt and the llama.cpp Vulkan engine
+          # - adds itself to the user PATH (no admin needed)
+          $dest = "$env:LOCALAPPDATA\fastollama"
+          New-Item -ItemType Directory -Force -Path $dest, "$dest\models", "$dest\logs" | Out-Null
+          Copy-Item -Path "$PSScriptRoot\*" -Destination $dest -Recurse -Force
+          $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+          if ($userPath -notlike "*fastollama*") {
+            [Environment]::SetEnvironmentVariable("Path", "$userPath;$dest", "User")
+            Write-Host "Added $dest to your PATH. Restart your terminal."
+          }
+          Write-Host ""
+          Write-Host "fastollama installed to $dest"
+          Write-Host "Next steps:"
+          Write-Host "  fastollama pull qwen3.8-27b-iq2s --set   # 27B, fits fully on GPU"
+          Write-Host "  fastollama serve                          # http://127.0.0.1:8080"
+          '@
+          Set-Content -Path installer/install.ps1 -Value $install
+          $serve = @'
+          # starts fastollama serve in a visible console window
+          $dest = Split-Path -Parent $MyInvocation.MyCommand.Path
+          & "$dest\fastollama.exe" serve
+          '@
+          Set-Content -Path installer/serve.ps1 -Value $serve
+
+      - name: Zip installer
+        shell: pwsh
+        run: |
+          Compress-Archive -Path installer/* -DestinationPath fastollama-windows-x64.zip
+          Get-Item fastollama-windows-x64.zip | Select-Object Name, Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastollama-windows-x64
+          path: fastollama-windows-x64.zip
+
+      - name: Attach to release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: fastollama-windows-x64.zip

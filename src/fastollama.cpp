@@ -10,8 +10,11 @@
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
+#ifndef _WIN32
 #include <sys/statvfs.h>
 #include <sys/wait.h>
+#endif
+#include "compat_win.h"
 #include <unistd.h>
 #include <vector>
 #include <limits.h>
@@ -25,12 +28,19 @@ static std::string trim(const std::string& s) {
 }
 
 static std::string exe_dir() {
+#ifdef _WIN32
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    if (n <= 0) return ".";
+    buf[n] = 0;
+#else
     char buf[PATH_MAX];
     ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
     if (n <= 0) return ".";
     buf[n] = 0;
+#endif
     std::string p(buf);
-    size_t s = p.find_last_of('/');
+    size_t s = p.find_last_of("/\\");
     return s == std::string::npos ? "." : p.substr(0, s);
 }
 
@@ -443,6 +453,7 @@ static double kv_bytes_per_elem(const std::string& q) {
     return 0.5625;
 }
 
+#ifndef _WIN32
 static int amd_card_with_largest_vram() {
     int best = -1;
     uint64_t best_total = 0;
@@ -479,8 +490,21 @@ static uint64_t amd_vram_used() {
     if (tf.is_open()) tf >> u;
     return u;
 }
+#else
+// Windows: DXGI reports the real adapter; same semantics as the sysfs readers.
+static uint64_t amd_vram_total() {
+    uint64_t t = amd_vram_total_dxgi();
+    return t ? t : 16304ull * 1024 * 1024;
+}
+static uint64_t amd_vram_used() {
+    return amd_vram_used_dxgi();
+}
+#endif
 
 static uint64_t ram_available_bytes() {
+#ifdef _WIN32
+    return win_ram_available_bytes();
+#else
     // MemAvailable (kernel's own reclaimable-cache-aware estimate) is the right
     // metric: _SC_AVPHYS_PAGES excludes page cache, so a freshly-downloaded model
     // file filling the cache looks like "no RAM free" even though mmap of that
@@ -497,7 +521,33 @@ static uint64_t ram_available_bytes() {
     long psize = sysconf(_SC_PAGESIZE);
     if (pages <= 0 || psize <= 0) return 0;
     return (uint64_t)pages * (uint64_t)psize;
+#endif
 }
+
+// VRAM watchdog shared by serve: forked process on Linux, thread on Windows.
+struct VramGuardCtx { uint64_t srv = 0; double em = 0.95; };
+#ifdef _WIN32
+static DWORD WINAPI vram_guard_thread(LPVOID p) {
+    VramGuardCtx* c = (VramGuardCtx*)p;
+    uint64_t total = amd_vram_total();
+    while (true) {
+        Sleep(200);
+        HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, (DWORD)c->srv);
+        if (!h) return 0; // server already gone
+        DWORD wr = WaitForSingleObject(h, 0);
+        CloseHandle(h);
+        if (wr == WAIT_OBJECT_0) return 0;
+        uint64_t used = amd_vram_used();
+        if (total > 0 && used >= (uint64_t)((double)total * c->em)) {
+            std::cerr << "\n[fastollama] VRAM GUARD: " << used / 1024 / 1024 << "/"
+                      << total / 1024 / 1024 << " MiB used — stopping server to protect the desktop\n";
+            HANDLE h2 = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)c->srv);
+            if (h2) { TerminateProcess(h2, 42); WaitForSingleObject(h2, 5000); CloseHandle(h2); }
+            return 42;
+        }
+    }
+}
+#endif
 
 
 static bool file_exists(const std::string& path);
@@ -574,17 +624,22 @@ struct App {
         return model_path("Qwen3-8B-Q4_K_M");
     }
     std::string draft_model() const { return model_path(cfg.get("draft_model", "Qwen3-0.6B-Q4_K_M")); }
+#ifdef _WIN32
+    static const char* EXE() { return ".exe"; }
+#else
+    static const char* EXE() { return ""; }
+#endif
     std::string llama_server() const {
         std::string ed = cfg.get("engine_dir", "");
         if (!ed.empty()) {
-            if (ed[0] != '/') ed = base + "/" + ed;
-            return ed + "/llama-server";
+            if (ed[0] != '/' && ed[1] != ':') ed = base + "/" + ed;
+            return ed + "/llama-server" + EXE();
         }
-        return base + "/llama.cpp/" + backend_dir() + "/bin/llama-server";
+        return base + "/llama.cpp/" + backend_dir() + "/bin/llama-server" + EXE();
     }
-    std::string llama_cli() const { return base + "/llama.cpp/" + backend_dir() + "/bin/llama-cli"; }
-    std::string llama_bench() const { return base + "/llama.cpp/" + backend_dir() + "/bin/llama-bench"; }
-    std::string llama_quantize() const { return base + "/llama.cpp/" + backend_dir() + "/bin/llama-quantize"; }
+    std::string llama_cli() const { return base + "/llama.cpp/" + backend_dir() + "/bin/llama-cli" + EXE(); }
+    std::string llama_bench() const { return base + "/llama.cpp/" + backend_dir() + "/bin/llama-bench" + EXE(); }
+    std::string llama_quantize() const { return base + "/llama.cpp/" + backend_dir() + "/bin/llama-quantize" + EXE(); }
     std::string backend_dir() const {
         std::string b = cfg.get("backend", "vulkan");
         return b == "hip" || b == "rocm" ? "build-hip" : b == "cpu" ? "build-cpu" : "build-vk";
@@ -833,6 +888,7 @@ static std::vector<char*> to_argv(const std::vector<std::string>& in) {
     return out;
 }
 
+#ifndef _WIN32
 static pid_t run(const std::vector<std::string>& args, bool wait = true) {
     auto av = to_argv(args);
     pid_t pid = fork();
@@ -848,6 +904,22 @@ static pid_t run(const std::vector<std::string>& args, bool wait = true) {
     }
     return pid;
 }
+#else
+static int run(const std::vector<std::string>& args, bool wait = true) {
+    if (wait) {
+        int code = win_run(args);
+        if (code == 127) {
+            std::cerr << "failed to start " << args[0] << "\n";
+            exit(1);
+        }
+        if (code != 0) exit(code);
+        return 0;
+    }
+    WinProc wp = win_spawn(args);
+    if (!wp.h) { std::cerr << "failed to start " << args[0] << "\n"; return -1; }
+    return (int)wp.pid;
+}
+#endif
 
 static void gpu_args(App& app, const std::string& model, std::vector<std::string>& v) {
     std::string ngl;
@@ -978,7 +1050,8 @@ static std::vector<std::string> model_args(App& app, bool want_draft) {
         } else {
             std::cerr << "[fastollama] mtp_model missing or arch mismatch (" << mtp << "), running without MTP\n";
         }
-    } else if (spec_type == "draft" && want_draft && file_exists(app.draft_model())) {
+    } else if (spec_type == "draft") {
+        if (want_draft && file_exists(app.draft_model())) {
         v.push_back("--model-draft");
         v.push_back(app.draft_model());
         v.push_back("-ngld");
@@ -996,6 +1069,10 @@ static std::vector<std::string> model_args(App& app, bool want_draft) {
         // context so a 0.6B drafter's KV is ~470 MB instead of ~7.5 GB at 262K.
         int dctx = app.cfg.geti("draft_ctx", 0);
         if (dctx > 0) setenv("FASTOLLAMA_DRAFT_CTX", std::to_string(dctx).c_str(), 1);
+        } else {
+            std::cerr << "[fastollama] spec_type=draft but draft model not found: "
+                      << app.draft_model() << " — running WITHOUT speculation\n";
+        }
     } else if (spec_type == "ngram") {
         // ngram speculation: drafts continuations from recently seen token n-grams.
         // NO draft model -> NO draft KV (this fork hardwires draft ctx = target ctx,
@@ -1073,6 +1150,7 @@ static void cmd_serve(App& app, const std::vector<std::string>& extra) {
     // Budget-side enforcement happens in plan_vram (vram_limit_gb); this is the last resort.
     if (srv > 0 && app.cfg.getb("vram_guard", true)) {
         double em = app.cfg.getf("vram_emergency_pct", 0.95f); // 95%: the 0.2s poll can't outrun a load spike; the plan-side budget is the real enforcement
+#ifndef _WIN32
         pid_t guard = fork();
         if (guard == 0) {
             uint64_t total = amd_vram_total();
@@ -1090,6 +1168,12 @@ static void cmd_serve(App& app, const std::vector<std::string>& extra) {
                 }
             }
         }
+#else
+        static VramGuardCtx gctx;
+        gctx.srv = (uint64_t)srv;
+        gctx.em = em;
+        CreateThread(nullptr, 0, vram_guard_thread, &gctx, 0, nullptr);
+#endif
     }
 }
 
@@ -1182,6 +1266,7 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
         {"qwen3.8-27b", "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-Q4_K_XL.gguf"},
         {"qwen3.8-27b-iq4", "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-IQ4_XS.gguf"},
         {"qwen3.8-27b-iq2s", "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-IQ2_S.gguf"},
+        {"qwen3.8-27b-iq2xxs", "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-IQ2_XXS.gguf"},
         {"qwen3.8-27b-iq1m", "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-IQ1_M.gguf"},
         {"qwen3-next-80b", "https://huggingface.co/unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF/resolve/main/Qwen3-Next-80B-A3B-Instruct-UD-IQ2_XXS.gguf"},
         {"qwen3.8-27b-mtp", "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/MTP/mtp-Qwen3.8-27B-Q4_0.gguf"},
@@ -1240,6 +1325,20 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
     }
 
     // disk-space guard: model downloads are multi-GB, refuse to fill the disk
+#ifdef _WIN32
+    {
+        uint64_t fb = 0;
+        if (win_disk_free_bytes(app.base.c_str(), &fb)) {
+            double free_gb = (double)fb / (1024.0 * 1024.0 * 1024.0);
+            if (free_gb < 10.0) {
+                std::cerr << "only " << (int)free_gb << " GB free on " << app.base
+                          << " — models need 7-27 GB. free some space first\n";
+                exit(1);
+            }
+            std::cerr << "(" << (int)free_gb << " GB free on disk)\n";
+        }
+    }
+#else
     struct statvfs vfs;
     if (statvfs(app.base.c_str(), &vfs) == 0) {
         double free_gb = (double)vfs.f_bavail * vfs.f_frsize / (1024.0 * 1024.0 * 1024.0);
@@ -1250,6 +1349,7 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
         }
         std::cerr << "(" << (int)free_gb << " GB free on disk)\n";
     }
+#endif
 
     // download helper with resume + retry (shared by all shards)
     auto remote_bytes = [](const std::string& u) -> uint64_t {
@@ -1266,18 +1366,22 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
         // refuse to start a download that cannot fit: wasted hours are worse than errors
         uint64_t rb = remote_bytes(u);
         if (rb > 0) {
+            uint64_t free_b = 0;
+#ifdef _WIN32
+            win_disk_free_bytes(app.base.c_str(), &free_b);
+#else
             struct statvfs v2;
-            if (statvfs(app.base.c_str(), &v2) == 0) {
-                double free_b = (double)v2.f_bavail * v2.f_frsize;
-                if (free_b < (double)rb * 1.05) {
-                    std::cerr << "not enough disk: need " << rb / 1024 / 1024 / 1024
-                              << " GB, have " << (uint64_t)free_b / 1024 / 1024 / 1024 << " GB\n";
-                    exit(1);
-                }
+            if (statvfs(app.base.c_str(), &v2) == 0) free_b = (uint64_t)v2.f_bavail * v2.f_frsize;
+#endif
+            if (free_b > 0 && (double)free_b < (double)rb * 1.05) {
+                std::cerr << "not enough disk: need " << rb / 1024 / 1024 / 1024
+                          << " GB, have " << free_b / 1024 / 1024 / 1024 << " GB\n";
+                exit(1);
             }
         }
         std::cerr << "pulling " << u << "\ninto   " << d << "\n";
         fflush(stderr);
+#ifndef _WIN32
         pid_t pid = fork();
         if (pid == 0) {
             execlp("curl", "curl", "-L", "--fail", "--retry", "5", "--retry-delay", "3",
@@ -1288,6 +1392,10 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
         int st = 0;
         waitpid(pid, &st, 0);
         return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+#else
+        return win_run({"curl", "-L", "--fail", "--retry", "5", "--retry-delay", "3",
+                        "-C", "-", "-o", d, u}) == 0;
+#endif
     };
 
     // llama.cpp multi-shard models: file is X-00001-of-0000M.gguf and llama-server loads
