@@ -8,6 +8,8 @@ on:
 jobs:
   windows-installer:
     runs-on: windows-latest
+    permissions:
+      contents: write # needed to create the release and attach the installer
     steps:
       - uses: actions/checkout@v4
 
