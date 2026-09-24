@@ -983,12 +983,19 @@ static std::vector<std::string> model_args(App& app, bool want_draft) {
         v.push_back(app.draft_model());
         v.push_back("-ngld");
         v.push_back(std::to_string(app.cfg.geti("gpu_layers_draft", 999)));
+        // this fork defaults --spec-type to none; draft-simple must be explicit
+        v.push_back("--spec-type");
+        v.push_back("draft-simple");
         v.push_back("--spec-draft-n-max");
         v.push_back(std::to_string(app.cfg.geti("draft_max", 24)));
         v.push_back("--spec-draft-n-min");
         v.push_back(std::to_string(app.cfg.geti("draft_min", 4)));
         v.push_back("--spec-draft-p-min");
         v.push_back(std::to_string(app.cfg.getf("draft_p_min", 0.75f)));
+        // patched fork (see llama.cpp/common/speculative.cpp): shrink the DRAFT
+        // context so a 0.6B drafter's KV is ~470 MB instead of ~7.5 GB at 262K.
+        int dctx = app.cfg.geti("draft_ctx", 0);
+        if (dctx > 0) setenv("FASTOLLAMA_DRAFT_CTX", std::to_string(dctx).c_str(), 1);
     } else if (spec_type == "ngram") {
         // ngram speculation: drafts continuations from recently seen token n-grams.
         // NO draft model -> NO draft KV (this fork hardwires draft ctx = target ctx,

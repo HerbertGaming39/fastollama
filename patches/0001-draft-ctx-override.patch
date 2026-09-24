@@ -1,0 +1,27 @@
+diff --git a/common/speculative.cpp b/common/speculative.cpp
+index 77dfe95..4f18571 100644
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -2546,8 +2546,20 @@ common_speculative_init_result::common_speculative_init_result(
+         cparams.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+     }
+ 
+-    // the draft context holds as many tokens per sequence as the target context
+-    cparams.n_ctx = llama_n_ctx(ctx_tgt);
++    // fastollama patch: the draft context normally holds as many tokens per
++    // sequence as the target context, but a 262K draft ctx costs the DRAFT
++    // model's full KV (e.g. ~7.5 GB for a 0.6B drafter) which never fits
++    // alongside a big target. Drafting only needs recent tokens, so allow an
++    // override that shrinks draft ctx while keeping acceptance quality.
++    {
++        const char * dctx = getenv("FASTOLLAMA_DRAFT_CTX");
++        if (dctx && atoi(dctx) > 0) {
++            uint32_t dc = (uint32_t)atoi(dctx);
++            cparams.n_ctx = dc < llama_n_ctx(ctx_tgt) ? dc : llama_n_ctx(ctx_tgt);
++        } else {
++            cparams.n_ctx = llama_n_ctx(ctx_tgt);
++        }
++    }
+ 
+     // note: for small models maybe we can set this to the maximum possible draft from all speculative types
+     //       the extra memory for small models is likely negligible?

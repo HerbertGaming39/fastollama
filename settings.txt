@@ -98,12 +98,21 @@ flash_attn = 1
 #   For Qwen3.8-27B use: spec_type = draft-mtp + mtp_model = mtp-Qwen3.8-27B-Q4_0
 # spec_type = draft: classic small-draft-model speculative decoding.
 # spec_type = off (or empty + speculative = 0) disables it.
-# spec_type = ngram: n-gram speculation (no draft model; this fork hardwires
-# draft ctx = main ctx, so a real drafter at 262K would cost ~9 GB KV).
+# spec_type = draft: draft-model speculation. Qwen3-0.6B-Q8 shares the 80B's exact
+# tokenizer (required). Needs the PATCHED llama.cpp (FASTOLLAMA_DRAFT_CTX env)
+# that shrinks draft ctx: draft_ctx = 8192 -> drafter KV ~270 MB instead of ~7.5 GB.
+# MEASURED MATH: with 37 CPU expert layers verification scales ~linearly with the
+# batch, so draft speculation LOSES to plain generation on this 16 GB card
+# (~23 vs ~34 t/s). It wins only with ALL experts on GPU (24 GB card).
+# Keep spec_type = ngram for the free +0.6 t/s; see docs/80ts-plan.md.
 spec_type = ngram
+draft_model = Qwen3-0.6B-Q8_0
+draft_ctx = 8192
+gpu_layers_draft = 999
 mtp_model = mtp-Qwen3.8-27B-Q4_0
-draft_max = 8
+draft_max = 6
 draft_min = 1
+draft_p_min = 0.6
 # legacy switch for spec_type = draft (ignored when spec_type = draft-mtp)
 speculative = 0
 draft_model = Qwen3-0.6B-IQ4_XS
