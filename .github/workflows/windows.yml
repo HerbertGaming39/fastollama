@@ -23,8 +23,14 @@ jobs:
       - name: Fetch official llama.cpp Vulkan binaries
         shell: pwsh
         run: |
-          $r = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
-          $asset = $r.assets | Where-Object { $_.name -match "bin-win-vulkan-x64" } | Select-Object -First 1
+          # /releases/latest resolves to the version tag (no binaries); the
+          # build-tag releases (bNNNNN) carry the prebuilt Windows binaries.
+          $asset = $null
+          foreach ($page in 1..3) {
+            $rels = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=20&page=$page"
+            $asset = $rels | ForEach-Object { $_.assets } | Where-Object { $_.name -match "bin-win-vulkan-x64\.zip$" } | Select-Object -First 1
+            if ($asset) { break }
+          }
           if (!$asset) { throw "no vulkan asset found" }
           Write-Host "downloading $($asset.name)"
           Invoke-WebRequest -Uri $asset.browser_download_url -OutFile engine.zip
