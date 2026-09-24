@@ -47,7 +47,8 @@ Full **262,144-token context** (native max), VRAM capped at 15 GB so the desktop
 
 | model | context | gen t/s | prompt t/s | VRAM (engine) | mode |
 |---|---|---|---|---|---|
-| **Qwen3.8-27B-UD-IQ2_S*** | 131072 | **45–48** | ~64 | 12.2 GB | full_gpu |
+| **Qwen3.8-27B-UD-IQ2_XXS*** | 262144 | **50–51** | ~66 | 13.5 GB | full_gpu |
+| Qwen3.8-27B-UD-IQ2_S* | 131072 | 45–48 | ~64 | 12.2 GB | full_gpu |
 | **Qwen3-Next-80B-A3B-UD-IQ2_XXS*** | 262144 | **32–35** | ~55 | 13.8 GB | expert split (19/48 expert layers on GPU) |
 | Qwen3.8-27B-UD-IQ1_M (max speed) | 262144 | 90–92† | 184 | 14.5 GB | full_gpu |
 | Qwen3.8-Flash-Next-UD-IQ1_S (177B-class Qwen4-preview arch) | 262144 | 4.0† | 119 | 14.1 GB | expert split (44/48 experts in RAM) |
@@ -106,6 +107,7 @@ The governor exists to get you into the right class automatically: `model = auto
 
 ```bash
 bin/fastollama pull qwen3.8-27b-iq2s --set   # 27B dense, best balance (8.4 GB)
+bin/fastollama pull qwen3.8-27b-iq2xxs --set # 27B BEST on current engine: 51 t/s @262K (7.3 GB)
 bin/fastollama pull qwen3.8-27b-iq1m --set   # 27B max speed tier
 bin/fastollama pull qwen3.8-27b-iq2xxs --set # 27B max speed on current engine (7.0 GB)
 bin/fastollama pull qwen3-next-80b   --set   # 80B MoE (26.2 GB)
