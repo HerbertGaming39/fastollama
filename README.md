@@ -47,7 +47,8 @@ Full **262,144-token context** (native max), VRAM capped at 15 GB so the desktop
 
 | model | context | gen t/s | prompt t/s | VRAM (engine) | mode |
 |---|---|---|---|---|---|
-| **Qwen3.8-27B-UD-IQ2_XXS*** | 262144 | **50–51** | ~66 | 13.5 GB | full_gpu |
+| **Kimi-Linear-REAP-35B-A3B i1-IQ2_XXS (2026, native 1M ctx)*** | **1048576** | **175–180** | 643 @57K | 14.5 GB | full_gpu, everything on GPU |
+| Qwen3.8-27B-UD-IQ2_XXS* | 262144 | 50–51 | ~66 | 13.5 GB | full_gpu |
 | Qwen3.8-27B-UD-IQ2_S* | 131072 | 45–48 | ~64 | 12.2 GB | full_gpu |
 | **Qwen3-Next-80B-A3B-UD-IQ2_XXS*** | 262144 | **32–35** | ~55 | 13.8 GB | expert split (19/48 expert layers on GPU) |
 | Qwen3.8-27B-UD-IQ1_M (max speed) | 262144 | 90–92† | 184 | 14.5 GB | full_gpu |
@@ -55,7 +56,7 @@ Full **262,144-token context** (native max), VRAM capped at 15 GB so the desktop
 | Qwen3-30B-A3B-UD-Q4_K_XL (MoE) | 262144 | 30.5† | 105 | 13.5 GB | expert split |
 | Qwen3.8-27B-UD-Q4_K_XL (max quality) | 262144 | 6.9† | 27 | 13.4 GB | smart split |
 
-\* re-measured 2026-09-24 on the current engine build (6 threads, poll 100, ngram spec).
+\* re-measured 2026-09-24 (Qwen) and 2026-10-05 (Kimi) on the current engine build (6 threads, poll 100, spec off for the Kimi number — ngram adds nothing on prose).
 \† measured on an older engine build; the current fork is slower per token — treat these as history, not promises.
 
 Notes from the 2026-09-24 tuning session:
@@ -111,6 +112,8 @@ bin/fastollama pull qwen3.8-27b-iq2xxs --set # 27B BEST on current engine: 51 t/
 bin/fastollama pull qwen3.8-27b-iq1m --set   # 27B max speed tier
 bin/fastollama pull qwen3.8-27b-iq2xxs --set # 27B max speed on current engine (7.0 GB)
 bin/fastollama pull qwen3-next-80b   --set   # 80B MoE (26.2 GB)
+bin/fastollama pull kimi-linear-reap-xxs --set # 2026 1M-ctx MoE, 178 t/s (9.4 GB)
+bin/fastollama pull kimi-linear-reap     --set # same, IQ2_XS quality step (10.5 GB)
 
 ## Windows install
 

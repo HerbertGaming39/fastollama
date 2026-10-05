@@ -6,13 +6,14 @@
 # Model name inside models/ folder (without .gguf) or full path
 # quant guide: q8_0 = best quality/slowest, q6_k, q5_k_m, q4_k_m = fast, iq3/q3 = max speed
 # auto = walk the quant ladder, pick the biggest that fits the VRAM budget
-model = Qwen3.8-27B-UD-IQ2_XXS
+model = Kimi-Linear-REAP-35B-A3B-Instruct.i1-IQ2_XXS
 
-# MEASURED on this PC (full 262144 context, VRAM <= 15 GB, MTP on, full_gpu = 1):
-#   Qwen3.8-27B-UD-IQ2_S      80-86 t/s gen / 1000 t/s pp  <-- DEFAULT: whole 27B on GPU!
-#   Qwen3.8-27B-UD-IQ2_XXS    86 t/s gen / 179 t/s pp  (max speed, more quality risk)
-#   Qwen3.8-27B-UD-IQ3_XXS     4.5 t/s gen /  33 t/s pp  (CPU-offload split, quality+)
-#   Qwen3.8-27B-UD-Q4_K_XL     6.9 t/s gen /  27 t/s pp  (best 27B quality)
+# MEASURED on this PC (VRAM <= 15 GB, desktop stays usable):
+#   Kimi-Linear-REAP-35B i1-IQ2_XXS  178 t/s gen @ FULL 1048576 ctx  <-- DEFAULT:
+#     whole 35B MoE (3B active) on GPU, 2026 1M-ctx arch, spec off, see README
+#   Qwen3.8-27B-UD-IQ2_S      45-48 t/s gen @ 131072 ctx (whole 27B on GPU)
+#   Qwen3.8-27B-UD-IQ2_XXS    50-51 t/s gen @ 262144 ctx (whole 27B on GPU)
+#   Qwen3-Next-80B-UD-IQ2_XXS 32-35 t/s gen @ 262144 ctx (expert split, ceiling)
 #   Qwen3-30B-A3B ...Q4_K_XL  30.5 t/s gen / 105 t/s pp  (MoE, best quality-per-tok)
 #     ^ same 30B at context = 40960: 40.3 t/s gen / 154 t/s pp
 # Speed rule of thumb on this box: ANY CPU-resident tensor (even FFN) drops the
@@ -53,13 +54,22 @@ ot_mode = smart
 gpu_layers = 999
 
 # --- Context / memory ---
-# context = 262144 -> Qwen3.8-27B native max (no yarn needed)
-# context = 40960  -> Qwen3-8B native max
-context = 262144
+# Kimi-Linear REAP-35B: native 1,048,576 context (KDA linear attention + 7 MLA layers)
+context = 1048576
 
 # kv_cache: f16 = full quality / most VRAM, q8_0 = ~2x smaller (~0.1% loss),
 # q4_0 = 4x smaller (use for 256k context; needed so most layers stay on GPU)
 kv_cache = q4_0
+# K cache type only; V stays f16 for kimi-linear (KDA V-state head_dim 72 is not
+# divisible by the 32-wide q4_0 block -> engine refuses q4_0 V)
+kv_cache_v = f16
+# calibrated bytes/token for the WHOLE model in kv_cache format (0 = auto-detect).
+# Kimi-Linear REAP-35B: only 7 MLA layers cache per-token KV (576 elems = 8064 B
+# f16); the 20 KDA layers keep fixed-size recurrent state (~10 MB total). With
+# K=q4_0 (576*0.5625=324 B) + V=f16 (72*2=144 B) = 468 B/token per model
+# -> 1,048,576 ctx = ~0.5 GB. Auto-detect would assume all 27 layers carry
+# 32-head KV = ~10x overestimate and wrongly kill full-GPU.
+kv_token_bytes = 468
 
 # mlock = 1 pins model in RAM so it never swaps. no_mmap = 1 loads fully to RAM first.
 # no_mmap+mlock: -ot CPU expert tensors get a contiguous pinned RAM copy -> no page
@@ -105,7 +115,7 @@ flash_attn = 1
 # batch, so draft speculation LOSES to plain generation on this 16 GB card
 # (~23 vs ~34 t/s). It wins only with ALL experts on GPU (24 GB card).
 # Keep spec_type = ngram for the free +0.6 t/s; see docs/80ts-plan.md.
-spec_type = ngram
+spec_type = off
 draft_model = Qwen3-0.6B-Q8_0
 draft_ctx = 8192
 gpu_layers_draft = 999

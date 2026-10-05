@@ -699,8 +699,21 @@ static VramPlan plan_vram(const App& app, const std::string& model) {
     }
     uint64_t ctx = (uint64_t)app.cfg.geti("context", 40960);
     std::string kvq = app.cfg.get("kv_cache", "q8_0");
-    double per_token = 2.0 * g.n_head_kv * g.head_dim * kv_bytes_per_elem(kvq);
-    double kv_bytes = per_token * (double)g.n_kv_layers * (double)ctx * 1.05;
+    double kv_bytes;
+    double kb_override = app.cfg.getf("kv_token_bytes", 0.0);
+    if (kb_override > 0.0) {
+        // Manual calibration for archs whose real cache shape differs from the
+        // metadata (MLA compressed KV, linear-attention hybrid). This is BYTES
+        // PER TOKEN for the WHOLE model (all layers combined) in the configured
+        // kv_cache format. Example Kimi-Linear REAP-35B: 7 MLA layers cache
+        // 576 elems (512 kv_lora + 64 rope) = 8064 B/token f16; KDA/conv state
+        // is fixed-size (~10 MB total, context-independent). So f16 = 8064,
+        // q8_0 = 4284, q4_0 = 2268 (each cache row quantizes to its block size).
+        kv_bytes = kb_override * (double)ctx * 1.05;
+    } else {
+        double per_token = 2.0 * g.n_head_kv * g.head_dim * kv_bytes_per_elem(kvq);
+        kv_bytes = per_token * (double)g.n_kv_layers * (double)ctx * 1.05;
+    }
     int ub = app.cfg.geti("ubatch", 512);
     double compute_bytes = 0.45e9 + 0.7e-3 * ub * 1e6 + 0.15e9;
     // MTP sidecar weights live on the GPU too
@@ -1031,7 +1044,9 @@ static std::vector<std::string> model_args(App& app, bool want_draft) {
     std::string kv = app.cfg.get("kv_cache", "q8_0");
     if (kv != "f16" && app.cfg.getb("flash_attn", true)) {
         v.push_back("-ctk"); v.push_back(kv);
-        v.push_back("-ctv"); v.push_back(kv);
+        // see cmd_bench: kimi-linear KDA layers need V in f16 (head_dim 72 % 32 != 0)
+        std::string kvv = app.cfg.get("kv_cache_v", kv);
+        v.push_back("-ctv"); v.push_back(kvv);
     }
     // speculative decoding: spec_type = draft (small model) or draft-mtp (MTP sidecar)
     std::string spec_type = app.cfg.get("spec_type", "");
@@ -1237,7 +1252,11 @@ static void cmd_bench(App& app, const std::vector<std::string>& extra) {
     std::string kv = app.cfg.get("kv_cache", "q8_0");
     if (kv != "f16" && app.cfg.getb("flash_attn", true)) {
         v.push_back("-ctk"); v.push_back(kv);
-        v.push_back("-ctv"); v.push_back(kv);
+        // kv_cache_v: KDA/hybrid archs (kimi-linear) need V in f16 — their
+        // recurrent V-state head_dim (e.g. 72) is not divisible by the 32-wide
+        // q4_0 block. K (MLA 576-wide) quantizes fine.
+        std::string kvv = app.cfg.get("kv_cache_v", kv);
+        v.push_back("-ctv"); v.push_back(kvv);
     }
     v.push_back("-n"); v.push_back(std::to_string(app.cfg.geti("bench_tokens", 256)));
     v.push_back("-r"); v.push_back(std::to_string(app.cfg.geti("bench_reps", 3)));
@@ -1296,6 +1315,12 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
         {"qwen3-4b-iq4", "https://huggingface.co/unsloth/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-IQ4_XS.gguf"},
         {"qwen3-4b-2507", "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-IQ4_XS.gguf"},
         {"qwen3-8b-iq4", "https://huggingface.co/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-IQ4_XS.gguf"},
+        // --- 2026 long-context MoE: Kimi-Linear KDA+MLA hybrid, native 1,048,576 ctx ---
+        // REAP-35B = Cerebras' official prune of Kimi-Linear-48B (180 of 256 experts kept).
+        {"kimi-linear-reap", "https://huggingface.co/mradermacher/Kimi-Linear-REAP-35B-A3B-Instruct-i1-GGUF/resolve/main/Kimi-Linear-REAP-35B-A3B-Instruct.i1-IQ2_XS.gguf"},
+        {"kimi-linear-reap-xxs", "https://huggingface.co/mradermacher/Kimi-Linear-REAP-35B-A3B-Instruct-i1-GGUF/resolve/main/Kimi-Linear-REAP-35B-A3B-Instruct.i1-IQ2_XXS.gguf"},
+        {"kimi-linear-reap-iq2m", "https://huggingface.co/mradermacher/Kimi-Linear-REAP-35B-A3B-Instruct-i1-GGUF/resolve/main/Kimi-Linear-REAP-35B-A3B-Instruct.i1-IQ2_M.gguf"},
+        {"kimi-linear-reap-iq3xs", "https://huggingface.co/mradermacher/Kimi-Linear-REAP-35B-A3B-Instruct-i1-GGUF/resolve/main/Kimi-Linear-REAP-35B-A3B-Instruct.i1-IQ3_XS.gguf"},
         // --- non-Qwen families: anything llama.cpp supports works here ---
         {"llama3.1-8b", "https://huggingface.co/unsloth/Llama-3.1-8B-GGUF/resolve/main/Llama-3.1-8B-Q4_K_M.gguf"},
         {"llama3.2-3b", "https://huggingface.co/unsloth/Llama-3.2-3B-GGUF/resolve/main/Llama-3.2-3B-Q4_K_M.gguf"},
