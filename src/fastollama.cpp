@@ -551,6 +551,31 @@ static DWORD WINAPI vram_guard_thread(LPVOID p) {
 }
 #endif
 
+// Auto-warmup shared by serve: fire one hidden 256-token generation as soon as
+// /health answers, so the GPU's DVFS ramp (~1.4 s idle -> boost on RDNA4,
+// measured 2026-10-06) happens BEFORE the user's first real request instead of
+// inside it. Cold runs land 112-160 t/s, warm runs 177+ (see README).
+struct WarmupCtx { std::string url; };
+#ifdef _WIN32
+static DWORD WINAPI warmup_thread(LPVOID p) {
+    WarmupCtx* c = (WarmupCtx*)p;
+    const char* bfile = "fastollama-warmup.json";
+    FILE* bf = fopen(bfile, "w");
+    if (bf) { fputs("{\"prompt\":\"1 2\",\"n_predict\":256,\"ignore_eos\":true,\"temperature\":0}", bf); fclose(bf); }
+    for (int i = 0; i < 1200; i++) {
+        Sleep(500);
+        std::string hc = "curl --fail -s -m 2 " + c->url + "/health >NUL 2>&1";
+        if (system(hc.c_str()) != 0) continue;
+        std::string post = "curl -s -m 120 " + c->url + "/completion "
+                           "-H \"Content-Type: application/json\" -d @" + bfile + " >NUL 2>&1";
+        system(post.c_str());
+        std::cerr << "[fastollama] warmup done - GPU clocks boosted before first real request\n";
+        break;
+    }
+    return 0;
+}
+#endif
+
 
 static bool file_exists(const std::string& path);
 struct App;
@@ -574,12 +599,18 @@ struct App {
     Config cfg;
     std::string base;
     std::string lbin;
+    // models_dir: keep multi-GB models on another drive (e.g. a 1 TB HDD) while
+    // the repo stays on the fast NVMe. Empty = classic <base>/models.
+    std::string models_dir() const {
+        std::string md = cfg.get("models_dir", "");
+        return md.empty() ? base + "/models" : md;
+    }
     std::string model_path(const std::string& name) const {
         if (name.find('/') != std::string::npos) return name;
         // values may already carry the .gguf extension (e.g. MTP sidecars)
-        std::string raw = base + "/models/" + name;
+        std::string raw = models_dir() + "/" + name;
         if (file_exists(raw)) return raw;
-        std::string p = base + "/models/" + name + ".gguf";
+        std::string p = models_dir() + "/" + name + ".gguf";
         if (file_exists(p)) return p;
         // multi-shard models: the user names the model, we resolve to shard 1
         // (llama.cpp finds the rest automatically). Supports flat layout
@@ -587,9 +618,9 @@ struct App {
         for (int n = 2; n <= 9; n++) {
             char t[80];
             snprintf(t, sizeof(t), "-00001-of-0000%d.gguf", n);
-            std::string flat = base + "/models/" + name + t;
+            std::string flat = models_dir() + "/" + name + t;
             if (file_exists(flat)) return flat;
-            std::string in_dir = base + "/models/" + name + "/" + name + t;
+            std::string in_dir = models_dir() + "/" + name + "/" + name + t;
             if (file_exists(in_dir)) return in_dir;
         }
         return p;
@@ -1176,6 +1207,11 @@ static void cmd_serve(App& app, const std::vector<std::string>& extra) {
             gctx.em = app.cfg.getf("vram_emergency_pct", 0.95f);
             CreateThread(nullptr, 0, vram_guard_thread, &gctx, 0, nullptr);
         }
+        if (app.cfg.getb("warmup", true)) {
+            static WarmupCtx wctx;
+            wctx.url = "http://" + app.cfg.get("host", "127.0.0.1") + ":" + std::to_string(app.cfg.geti("port", 8080));
+            CreateThread(nullptr, 0, warmup_thread, &wctx, 0, nullptr);
+        }
         DWORD code = 0;
         WaitForSingleObject(wp.h, INFINITE);
         GetExitCodeProcess(wp.h, &code);
@@ -1202,6 +1238,44 @@ static void cmd_serve(App& app, const std::vector<std::string>& extra) {
                     _exit(42);
                 }
             }
+        }
+        if (app.cfg.getb("warmup", true)) {
+            // double fork: the grandchild polls /health and fires the warmup, then is
+            // reparented to init - no zombie to reap while we block on the server.
+            pid_t wu = fork();
+            if (wu == 0) {
+                if (fork() == 0) {
+                    std::string url = "http://" + app.cfg.get("host", "127.0.0.1") + ":" +
+                                      std::to_string(app.cfg.geti("port", 8080));
+                    const char* tmpd = getenv("TMPDIR");
+                    std::string bfile = std::string(tmpd ? tmpd : "/tmp") + "/fastollama-warmup.json";
+                    FILE* bf = fopen(bfile.c_str(), "w");
+                    if (bf) { fputs("{\"prompt\":\"1 2\",\"n_predict\":256,\"ignore_eos\":true,\"temperature\":0}", bf); fclose(bf); }
+                    for (int i = 0; i < 1200; i++) {   // up to 10 min: huge models load slowly
+                        usleep(500000);
+                        std::string hc = "curl --noproxy '*' -s -m 2 " + url + "/health 2>/dev/null";
+                        FILE* pp = popen(hc.c_str(), "r");
+                        bool ok = false;
+                        if (pp) { char b[64] = {}; ok = fread(b, 1, sizeof(b) - 1, pp) > 0 && strstr(b, "\"ok\"") != nullptr; pclose(pp); }
+                        if (!ok) continue;
+                        pid_t c2 = fork();
+                        if (c2 == 0) {
+                            std::string api = url + "/completion";
+                            std::string dat = "@" + bfile;
+                            execlp("curl", "curl", "--noproxy", "*", "-s", "-m", "120",
+                                   api.c_str(), "-H", "Content-Type: application/json",
+                                   "-d", dat.c_str(), "-o", "/dev/null", (char*)nullptr);
+                            _exit(127);
+                        }
+                        int ws2 = 0; waitpid(c2, &ws2, 0);
+                        std::cerr << "[fastollama] warmup done - GPU clocks boosted before first real request\n";
+                        _exit(0);
+                    }
+                    _exit(0);
+                }
+                _exit(0);
+            }
+            int ws = 0; waitpid(wu, &ws, 0); // reap the intermediate only
         }
     }
     int st = 0;
@@ -1290,6 +1364,23 @@ static void settings_set_kv(const std::string& base, const std::string& key, con
     for (auto& l : lines) out << l << "\n";
 }
 
+// Hugging Face auth for pulls: token from $FASTOLLAMA_HF_TOKEN or
+// ~/.config/fastollama/hf_token (single line). Deliberately NOT a settings.txt key -
+// that file is committed to a public repo; this keeps tokens out of git.
+static std::string hf_token() {
+    if (const char* e = getenv("FASTOLLAMA_HF_TOKEN")) { if (*e) return e; }
+    const char* home = getenv("HOME");
+    if (!home) return "";
+    std::string p = std::string(home) + "/.config/fastollama/hf_token";
+    FILE* f = fopen(p.c_str(), "r");
+    if (!f) return "";
+    char buf[256] = {};
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r' || buf[n-1] == ' ')) buf[--n] = 0;
+    return std::string(buf);
+}
+
 static void cmd_pull(App& app, const std::string& name, bool set_flag) {
     std::map<std::string, std::string> known = {
         {"qwen3-8b", "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf"},
@@ -1323,6 +1414,12 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
         {"kimi-linear-reap-xxs", "https://huggingface.co/mradermacher/Kimi-Linear-REAP-35B-A3B-Instruct-i1-GGUF/resolve/main/Kimi-Linear-REAP-35B-A3B-Instruct.i1-IQ2_XXS.gguf"},
         {"kimi-linear-reap-iq2m", "https://huggingface.co/mradermacher/Kimi-Linear-REAP-35B-A3B-Instruct-i1-GGUF/resolve/main/Kimi-Linear-REAP-35B-A3B-Instruct.i1-IQ2_M.gguf"},
         {"kimi-linear-reap-iq3xs", "https://huggingface.co/mradermacher/Kimi-Linear-REAP-35B-A3B-Instruct-i1-GGUF/resolve/main/Kimi-Linear-REAP-35B-A3B-Instruct.i1-IQ3_XS.gguf"},
+        // --- GLM (Z.ai) ---
+        // GLM-4.7 = 355B-class flagship (non-Flash). UD-Q2_K_XL = 3 shards ~135 GB;
+        // pull fetches ALL shards automatically. Running it needs ~90+ GB RAM, so this
+        // alias is for big-memory machines / keeping the weights on external storage.
+        // For THIS rig's 16 GB VRAM the runnable GLM would be GLM-4.5-Air (106B-A12B).
+        {"glm4.7", "https://huggingface.co/unsloth/GLM-4.7-GGUF/resolve/main/UD-Q2_K_XL/GLM-4.7-UD-Q2_K_XL-00001-of-00003.gguf"},
         // --- non-Qwen families: anything llama.cpp supports works here ---
         {"llama3.1-8b", "https://huggingface.co/unsloth/Llama-3.1-8B-GGUF/resolve/main/Llama-3.1-8B-Q4_K_M.gguf"},
         {"llama3.2-3b", "https://huggingface.co/unsloth/Llama-3.2-3B-GGUF/resolve/main/Llama-3.2-3B-Q4_K_M.gguf"},
@@ -1362,7 +1459,9 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
         size_t dot = out.find(".gguf");
         out = out.substr(0, dot);
     }
-    std::string dst = app.base + "/models/" + out + ".gguf";
+    std::string tok = hf_token();
+    std::string auth = tok.empty() ? "" : ("Authorization: Bearer " + tok);
+    std::string dst = app.models_dir() + "/" + out + ".gguf";
     if (file_exists(dst)) {
         std::cerr << "already have " << dst << "\n";
         if (set_flag) settings_set_kv(app.base, out.rfind("mtp-", 0) == 0 ? "draft_model" : "model", out);
@@ -1397,8 +1496,9 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
 #endif
 
     // download helper with resume + retry (shared by all shards)
-    auto remote_bytes = [](const std::string& u) -> uint64_t {
-        std::string cmd = "curl -sIL '" + u + "' 2>/dev/null | tr -d '\\r' | "
+    auto remote_bytes = [&auth](const std::string& u) -> uint64_t {
+        std::string cmd = "curl -sIL " + (auth.empty() ? std::string("") : ("-H '" + auth + "' ")) +
+                          "'" + u + "' 2>/dev/null | tr -d '\\r' | "
                           "awk 'tolower($1)==\"content-length:\" {v=$2} END{print v+0}'";
         FILE* pp = popen(cmd.c_str(), "r");
         if (!pp) return 0;
@@ -1429,8 +1529,12 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
 #ifndef _WIN32
         pid_t pid = fork();
         if (pid == 0) {
-            execlp("curl", "curl", "-L", "--fail", "--retry", "5", "--retry-delay", "3",
-                   "-C", "-", "-o", d.c_str(), u.c_str(), (char*)nullptr);
+            if (!auth.empty())
+                execlp("curl", "curl", "-L", "--fail", "--retry", "5", "--retry-delay", "3",
+                       "-H", auth.c_str(), "-C", "-", "-o", d.c_str(), u.c_str(), (char*)nullptr);
+            else
+                execlp("curl", "curl", "-L", "--fail", "--retry", "5", "--retry-delay", "3",
+                       "-C", "-", "-o", d.c_str(), u.c_str(), (char*)nullptr);
             std::cerr << "curl exec failed (is curl installed?)\n";
             _exit(127);
         }
@@ -1438,8 +1542,10 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
         waitpid(pid, &st, 0);
         return WIFEXITED(st) && WEXITSTATUS(st) == 0;
 #else
-        return win_run({"curl", "-L", "--fail", "--retry", "5", "--retry-delay", "3",
-                        "-C", "-", "-o", d, u}) == 0;
+        std::vector<std::string> cv = {"curl", "-L", "--fail", "--retry", "5", "--retry-delay", "3"};
+        if (!auth.empty()) { cv.push_back("-H"); cv.push_back(auth); }
+        cv.insert(cv.end(), {"-C", "-", "-o", d, u});
+        return win_run(cv) == 0;
 #endif
     };
 
@@ -1458,7 +1564,7 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
             name_i = out.substr(0, sh) + tail;
             url_i = url.substr(0, url.find_last_of('/') + 1) + name_i;
         }
-        std::string dst_i = app.base + "/models/" + name_i + ".gguf";
+        std::string dst_i = app.models_dir() + "/" + name_i + ".gguf";
         if (file_exists(dst_i)) {
             std::cerr << "already have shard " << i << "/" << n_shards << "\n";
             continue;

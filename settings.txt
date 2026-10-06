@@ -25,6 +25,20 @@ model = Kimi-Linear-REAP-35B-A3B-Instruct.i1-IQ2_XXS
 # (its MTP sidecar does not match its arch; fastollama auto-skips MTP for it).
 # Old small models still work: Qwen3-8B-IQ4_XS (~106 t/s), Qwen3-4B-Q3_K_S (~167 t/s via API).
 
+# models_dir: store models on another drive (e.g. a 1 TB HDD) while fastollama
+# lives on the NVMe. Full absolute model paths in `model = ...` also work.
+# Example: models_dir = /run/media/herbert/1 tb drive/fastollama/models
+models_dir =
+
+# warmup = 1: after the server loads, fastollama fires one hidden 256-token
+# generation so the GPU's DVFS ramp (~1.4 s idle->boost, measured 2026-10-06)
+# happens before your first real request. Cold runs 112-160 t/s, warm 177+.
+warmup = 1
+
+# Hugging Face token for pulls: put it (one line, hf-...) in
+# ~/.config/fastollama/hf_token or export FASTOLLAMA_HF_TOKEN. NOT here -
+# settings.txt is committed to a public repo.
+
 # --- Backend ---
 # vulkan = best speed on RX 9070 XT (recommended), hip = ROCm/HIP, cpu = no GPU
 backend = vulkan
