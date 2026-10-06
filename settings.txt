@@ -11,6 +11,9 @@ model = Kimi-Linear-REAP-35B-A3B-Instruct.i1-IQ2_XXS
 # MEASURED on this PC (VRAM <= 15 GB, desktop stays usable):
 #   Kimi-Linear-REAP-35B i1-IQ2_XXS  178 t/s gen @ FULL 1048576 ctx  <-- DEFAULT:
 #     whole 35B MoE (3B active) on GPU, 2026 1M-ctx arch, spec off, see README
+#   Kimi-Linear-REAP-35B i1-IQ2_XS   173.8 t/s gen @ FULL 1048576 ctx, 15.46 GiB VRAM
+#     (same speed as XXS within noise, +1.1 GB weights = quality-max; kept off default
+#      because it idles ~20 MiB under the 95% vram_guard kill line)
 #   Qwen3.8-27B-UD-IQ2_S      45-48 t/s gen @ 131072 ctx (whole 27B on GPU)
 #   Qwen3.8-27B-UD-IQ2_XXS    50-51 t/s gen @ 262144 ctx (whole 27B on GPU)
 #   Qwen3-Next-80B-UD-IQ2_XXS 32-35 t/s gen @ 262144 ctx (expert split, ceiling)

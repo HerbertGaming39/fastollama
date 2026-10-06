@@ -1317,6 +1317,8 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
         {"qwen3-8b-iq4", "https://huggingface.co/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-IQ4_XS.gguf"},
         // --- 2026 long-context MoE: Kimi-Linear KDA+MLA hybrid, native 1,048,576 ctx ---
         // REAP-35B = Cerebras' official prune of Kimi-Linear-48B (180 of 256 experts kept).
+        // IQ2_XS is the biggest quant that fits the 16 GB card at FULL 1M ctx
+        // (15.46/16.29 GiB measured 2026-10-06, 173.8 t/s ~= IQ2_XXS speed; IQ2_M 10.8 GB overflows).
         {"kimi-linear-reap", "https://huggingface.co/mradermacher/Kimi-Linear-REAP-35B-A3B-Instruct-i1-GGUF/resolve/main/Kimi-Linear-REAP-35B-A3B-Instruct.i1-IQ2_XS.gguf"},
         {"kimi-linear-reap-xxs", "https://huggingface.co/mradermacher/Kimi-Linear-REAP-35B-A3B-Instruct-i1-GGUF/resolve/main/Kimi-Linear-REAP-35B-A3B-Instruct.i1-IQ2_XXS.gguf"},
         {"kimi-linear-reap-iq2m", "https://huggingface.co/mradermacher/Kimi-Linear-REAP-35B-A3B-Instruct-i1-GGUF/resolve/main/Kimi-Linear-REAP-35B-A3B-Instruct.i1-IQ2_M.gguf"},
