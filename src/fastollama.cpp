@@ -14,10 +14,11 @@
 #include <sys/statvfs.h>
 #include <sys/wait.h>
 #endif
-#include "compat_win.h"
 #ifndef _WIN32
+#include <dirent.h>
 #include <unistd.h>
 #endif
+#include "compat_win.h"
 #include <vector>
 #include <limits.h>
 #include <cstdint>
@@ -27,6 +28,18 @@ static std::string trim(const std::string& s) {
     if (a == std::string::npos) return "";
     size_t b = s.find_last_not_of(" \t\r\n");
     return s.substr(a, b - a + 1);
+}
+
+// human size: exact GiB with 1 decimal (not ls -lh's rounded 132G)
+static std::string human_gib(uint64_t b) {
+    static const char* unit[] = {"KiB", "MiB", "GiB", "TiB"};
+    double v = (double)b;
+    int u = -1;
+    while (v >= 1240.0 && u < 3) { v /= 1024.0; u++; }
+    if (u < 0) u = 0;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.1f %s", v, unit[u]);
+    return buf;
 }
 
 static std::string exe_dir() {
@@ -1365,13 +1378,21 @@ static void settings_set_kv(const std::string& base, const std::string& key, con
 }
 
 // Hugging Face auth for pulls: token from $FASTOLLAMA_HF_TOKEN or
-// ~/.config/fastollama/hf_token (single line). Deliberately NOT a settings.txt key -
-// that file is committed to a public repo; this keeps tokens out of git.
-static std::string hf_token() {
-    if (const char* e = getenv("FASTOLLAMA_HF_TOKEN")) { if (*e) return e; }
+// $XDG_CONFIG_HOME/fastollama/hf_token (default ~/.config/fastollama/hf_token,
+// single line). Deliberately NOT a settings.txt key - that file is committed to a
+// public repo; this keeps tokens out of git.
+static std::string token_file_path() {
+    const char* x = getenv("XDG_CONFIG_HOME");
+    if (x && *x) return std::string(x) + "/fastollama/hf_token";
     const char* home = getenv("HOME");
     if (!home) return "";
-    std::string p = std::string(home) + "/.config/fastollama/hf_token";
+    return std::string(home) + "/.config/fastollama/hf_token";
+}
+
+static std::string hf_token() {
+    if (const char* e = getenv("FASTOLLAMA_HF_TOKEN")) { if (*e) return e; }
+    std::string p = token_file_path();
+    if (p.empty()) return "";
     FILE* f = fopen(p.c_str(), "r");
     if (!f) return "";
     char buf[256] = {};
@@ -1479,7 +1500,8 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
                           << " — models need 7-27 GB. free some space first\n";
                 exit(1);
             }
-            std::cerr << "(" << (int)free_gb << " GB free on disk)\n";
+            std::cerr << "(" << human_gib((uint64_t)(free_gb * (1024.0 * 1024.0 * 1024.0)))
+                      << " free on disk)\n";
         }
     }
 #else
@@ -1487,7 +1509,8 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
     if (statvfs(app.base.c_str(), &vfs) == 0) {
         double free_gb = (double)vfs.f_bavail * vfs.f_frsize / (1024.0 * 1024.0 * 1024.0);
         if (free_gb < 10.0) {
-            std::cerr << "only " << (int)free_gb << " GB free on " << app.base
+            std::cerr << "only " << human_gib((uint64_t)(free_gb * (1024.0 * 1024.0 * 1024.0)))
+                      << " free on " << app.base
                       << " — models need 7-27 GB. free some space first\n";
             exit(1);
         }
@@ -1520,7 +1543,8 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
 #endif
             if (free_b > 0 && (double)free_b < (double)rb * 1.05) {
                 std::cerr << "not enough disk: need " << rb / 1024 / 1024 / 1024
-                          << " GB, have " << free_b / 1024 / 1024 / 1024 << " GB\n";
+                          << " (" << human_gib(rb) << "), have "
+                          << free_b / 1024 / 1024 / 1024 << " (" << human_gib(free_b) << ")\n";
                 exit(1);
             }
         }
@@ -1530,10 +1554,12 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
         pid_t pid = fork();
         if (pid == 0) {
             if (!auth.empty())
-                execlp("curl", "curl", "-L", "--fail", "--retry", "5", "--retry-delay", "3",
+                execlp("curl", "curl", "-L", "--fail", "--retry", "10", "--retry-all-errors",
+                       "--retry-delay", "3", "--speed-time", "30", "--speed-limit", "1024",
                        "-H", auth.c_str(), "-C", "-", "-o", d.c_str(), u.c_str(), (char*)nullptr);
             else
-                execlp("curl", "curl", "-L", "--fail", "--retry", "5", "--retry-delay", "3",
+                execlp("curl", "curl", "-L", "--fail", "--retry", "10", "--retry-all-errors",
+                       "--retry-delay", "3", "--speed-time", "30", "--speed-limit", "1024",
                        "-C", "-", "-o", d.c_str(), u.c_str(), (char*)nullptr);
             std::cerr << "curl exec failed (is curl installed?)\n";
             _exit(127);
@@ -1542,7 +1568,8 @@ static void cmd_pull(App& app, const std::string& name, bool set_flag) {
         waitpid(pid, &st, 0);
         return WIFEXITED(st) && WEXITSTATUS(st) == 0;
 #else
-        std::vector<std::string> cv = {"curl", "-L", "--fail", "--retry", "5", "--retry-delay", "3"};
+        std::vector<std::string> cv = {"curl", "-L", "--fail", "--retry", "10", "--retry-all-errors",
+                                       "--retry-delay", "3", "--speed-time", "30", "--speed-limit", "1024"};
         if (!auth.empty()) { cv.push_back("-H"); cv.push_back(auth); }
         cv.insert(cv.end(), {"-C", "-", "-o", d, u});
         return win_run(cv) == 0;
@@ -1609,11 +1636,54 @@ static void cmd_quantize(App& app, const std::string& src_name, const std::strin
     run(v);
 }
 
+// aggregates shard names: ...-00001-of-00003.gguf -> base name, summed bytes
+static void list_dir(const std::string& dir, std::map<std::string, uint64_t>& out) {
+    DIR* d = opendir(dir.c_str());
+    if (!d) return;
+    struct dirent* e;
+    while ((e = readdir(d))) {
+        std::string n = e->d_name;
+        if (n.size() < 6 || n.substr(n.size() - 5) != ".gguf") continue;
+        struct stat st;
+        std::string full = dir + "/" + n;
+        if (stat(full.c_str(), &st) != 0 || S_ISDIR(st.st_mode)) continue;
+        size_t sh = n.find("-00001-of-");
+        if (sh != std::string::npos && n.find(".gguf") != std::string::npos) {
+            // shard 1: key on base name; shards 2..M add under the same base
+            n = n.substr(0, sh);
+        } else {
+            // shards 2..M: collapse their names to the base so they sum together
+            std::string nn = n;
+            // strip trailing -XXXXX-of-YYYYY
+            size_t dash = nn.find("-0000");
+            size_t of = nn.find("-of-");
+            if (dash != std::string::npos && of != std::string::npos && of > dash)
+                nn = nn.substr(0, dash);
+            n = nn;
+        }
+        out[n] += (uint64_t)st.st_size;
+    }
+    closedir(d);
+}
+
 static void cmd_list(App& app) {
-    std::string dir = app.base + "/models";
-    std::string cmd = "ls -lh " + dir + " 2>/dev/null | awk 'NR>1 {print $5, $9}'";
-    int rc = system(cmd.c_str());
-    (void)rc;
+    std::map<std::string, uint64_t> agg;
+    list_dir(app.base + "/models", agg);
+    std::string md = app.models_dir();
+    if (md != app.base + "/models") list_dir(md, agg);
+    if (agg.empty()) { std::cerr << "no models found\n"; return; }
+    std::string setting = app.cfg.get("model", "");
+    if (!setting.empty() && setting.rfind(".gguf") == std::string::npos) setting += ".gguf";
+    for (auto& kv : agg) {
+        std::cerr << (setting == kv.first ? "* " : "  ") << kv.first
+                  << "  " << human_gib(kv.second); // * = the model settings.txt serves
+        if (kv.first.substr(0, 6) == "mtp-")
+            std::cerr << "  (draft)";
+        std::cerr << "\n";
+    }
+    if (!agg.empty()) {
+        std::cerr << "(" << agg.size() << " model(s); * = current model in settings)\n";
+    }
 }
 
 static void cmd_plan(App& app, const std::string& model_override) {
@@ -1632,8 +1702,10 @@ static void cmd_plan(App& app, const std::string& model_override) {
     }
     std::cerr << "context       : " << app.cfg.geti("context", 40960) << "\n";
     std::cerr << "kv cache      : " << app.cfg.get("kv_cache", "q8_0") << "\n";
-    std::cerr << "vram budget   : " << p.allowed_bytes / 1024 / 1024 << " MiB\n";
-    std::cerr << "est. usage    : " << p.est_bytes / 1024 / 1024 << " MiB\n";
+    std::cerr << "vram budget   : " << p.allowed_bytes / 1024 / 1024 << " MiB ("
+              << human_gib(p.allowed_bytes) << ")\n";
+    std::cerr << "est. usage    : " << p.est_bytes / 1024 / 1024 << " MiB ("
+              << human_gib(p.est_bytes) << ")\n";
     std::cerr << "gpu layers    : " << p.ngl << " / " << g.n_layer << "\n";
     if (g.is_moe && p.n_expert_layers > 0) {
         std::cerr << "expert split  : GPU 0.." << p.expert_cpu_from - 1 << ", CPU "
@@ -1654,7 +1726,10 @@ static void usage() {
         "  quantize <src> <q> create a quantized copy (e.g. quantize Qwen3-8B-Q8_0 Q4_0)\n"
         "  list               list downloaded models\n"
         "  stop               kill running llama-server\n"
+        "  list               list downloaded models (exact sizes; * = settings model)\n"
         "settings: ./settings.txt (key = value, lines with # are comments)\n"
+        "tokens:   pull auth from $FASTOLLAMA_HF_TOKEN or $XDG_CONFIG_HOME/fastollama/hf_token\n"
+        "          (default ~/.config/fastollama/hf_token)\n"
         "extra:    args after -- are passed raw to llama.cpp binary\n";
 }
 
@@ -1693,8 +1768,9 @@ int main(int argc, char** argv) {
     }
     else if (cmd == "list") cmd_list(app);
     else if (cmd == "stop") {
-        int rc = system("pkill -f llama-server && echo stopped || echo nothing running");
-        (void)rc;
+        // bracket trick so pkill's own shell match isn't self-killed; rc from pkill (not echo)
+        int rc = system("pkill -f 'llama-serve[r]'");
+        std::cerr << (rc == 0 ? "stopped\n" : (rc == 256 ? "nothing running\n" : "stop failed (rc " + std::to_string(rc) + ")\n"));
     }
     else { usage(); return 1; }
     return 0;
